@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.0.5"
+$AppVersion = "5.1"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -290,13 +290,22 @@ function Start-UpdateCheckBackground {
     }
 
     $localVersionStr = $script:AppVersion
+    $scriptPathForUpdate = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+    $localScriptHash = ""
+    $localScriptLastWriteUtc = $null
+    try {
+        if ($scriptPathForUpdate -and (Test-Path $scriptPathForUpdate)) {
+            $localScriptHash = (Get-FileHash -Path $scriptPathForUpdate -Algorithm SHA256).Hash
+            $localScriptLastWriteUtc = (Get-Item -Path $scriptPathForUpdate).LastWriteTimeUtc
+        }
+    } catch {}
 
     # 2. Start Background Thread (Runspace)
     $script:UpdateRunspace = [PowerShell]::Create().AddScript({
         param($CurrentVer)
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         
-        $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; Content = ""; Error = "" }
+        $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; RemoteHash = ""; RemoteLastModifiedUtc = ""; Content = ""; Error = "" }
 
         try {
             $time = Get-Date -Format "yyyyMMddHHmmss"
@@ -306,6 +315,20 @@ function Start-UpdateCheckBackground {
             $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
             $content = $req.Content
             $jobRes.Content = $content
+            try {
+                $lm = $req.Headers["Last-Modified"]
+                if ($lm) {
+                    $jobRes.RemoteLastModifiedUtc = ([DateTime]::Parse($lm)).ToUniversalTime().ToString("o")
+                }
+            } catch {}
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$content)
+                $hashBytes = $sha.ComputeHash($bytes)
+                $jobRes.RemoteHash = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+            } finally {
+                $sha.Dispose()
+            }
 
             if ($content -match '\$AppVersion\s*=\s*"(\d+(\.\d+)+)"') {
                 $jobRes.RemoteVersion = $matches[1]
@@ -358,30 +381,74 @@ function Start-UpdateCheckBackground {
                 if ($jobResult.Status -eq "Success") {
                     $localVer  = [Version]$script:AppVersion
                     $remoteVer = [Version]$jobResult.RemoteVersion
+                    $remoteSeemsNewer = $true
+                    try {
+                        if ($jobResult.RemoteLastModifiedUtc -and $localScriptLastWriteUtc) {
+                            $remoteLastUtc = [DateTime]::Parse([string]$jobResult.RemoteLastModifiedUtc).ToUniversalTime()
+                            if ($remoteLastUtc -le $localScriptLastWriteUtc) { $remoteSeemsNewer = $false }
+                        }
+                    } catch {}
+                    $isContentPatch = ($remoteVer -eq $localVer -and $localScriptHash -and $jobResult.RemoteHash -and ($localScriptHash -ne $jobResult.RemoteHash) -and $remoteSeemsNewer)
                     
                     if ($lb) { 
                         $lb.AppendText("[UPDATE] Local: v$localVer | Remote: v$remoteVer`n")
+                        if ($isContentPatch) { $lb.AppendText("[UPDATE] Same version but newer script content detected.`n") }
+                        elseif ($remoteVer -eq $localVer -and $localScriptHash -and $jobResult.RemoteHash -and ($localScriptHash -ne $jobResult.RemoteHash) -and -not $remoteSeemsNewer) {
+                            $lb.AppendText("[UPDATE] Local script appears newer than remote; skipping patch prompt.`n")
+                        }
                         $lb.ScrollToEnd()
                     }
 
-                    if ($remoteVer -gt $localVer) {
-                        if ($lb) { $lb.AppendText(" -> Update Available!`n"); $lb.ScrollToEnd() }
+                    if ($remoteVer -gt $localVer -or $isContentPatch) {
+                        if ($lb) {
+                            if ($remoteVer -gt $localVer) { $lb.AppendText(" -> Update Available!`n") }
+                            else { $lb.AppendText(" -> Patch Update Available (same version).`n") }
+                            $lb.ScrollToEnd()
+                        }
                         
                         # Use Dispatcher to show dialog on UI thread
                         $window.Dispatcher.Invoke([Action]{
-                            $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
+                            $msg = if ($remoteVer -gt $localVer) {
+                                "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
+                            } else {
+                                "A script patch is available for your current version (v$localVer).`n`nThis updates fixes without changing the version number.`n`nDo you want to update now?"
+                            }
                             $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                             
                             if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
-                                $remoteContent = $jobResult.Content
-                                $backupName = "$(Split-Path $PSCommandPath -Leaf).bak"
-                                $backupPath = Join-Path (Get-DataPath) $backupName
-                                Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
-                                Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
-                                
-                                [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-                                Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
-                                $window.Close()
+                                try {
+                                    $remoteContent = [string]$jobResult.Content
+                                    if ([string]::IsNullOrWhiteSpace($remoteContent) -or $remoteContent.Length -lt 200) {
+                                        throw "Downloaded update content was empty or invalid."
+                                    }
+
+                                    $scriptPath = if ($scriptPathForUpdate) { $scriptPathForUpdate } else { if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path } }
+                                    if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path $scriptPath)) {
+                                        throw "Could not resolve script path for self-update."
+                                    }
+
+                                    $backupName = "$(Split-Path $scriptPath -Leaf).bak"
+                                    $backupPath = Join-Path (Get-DataPath) $backupName
+                                    Copy-Item -Path $scriptPath -Destination $backupPath -Force
+                                    Set-Content -Path $scriptPath -Value $remoteContent -Encoding UTF8 -Force
+
+                                    [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                                    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -WorkingDirectory (Split-Path -Parent $scriptPath)
+                                    $window.Close()
+                                } catch {
+                                    $errMsg = "Auto-update failed: $($_.Exception.Message)"
+                                    try { Write-GuiLog "[UPDATE] $errMsg" } catch {}
+
+                                    $fallback = [System.Windows.MessageBox]::Show(
+                                        "$errMsg`n`nOpen Releases page and update manually?",
+                                        "Update Failed",
+                                        [System.Windows.MessageBoxButton]::YesNo,
+                                        [System.Windows.MessageBoxImage]::Warning
+                                    )
+                                    if ($fallback -eq [System.Windows.MessageBoxResult]::Yes) {
+                                        Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/releases"
+                                    }
+                                }
                             }
                         })
                     } else {
@@ -929,15 +996,78 @@ function Show-HostsEditor {
 }
 # --- STORAGE / SYSTEM ---
 function Invoke-ChkdskAll {
-    $confirm = [System.Windows.MessageBox]::Show("Run CHKDSK /f /r on all drives? This may require a reboot and can take a while.", "Confirm CHKDSK", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    $confirm = [System.Windows.MessageBox]::Show("Run CHKDSK /f /r on all file-system drives in a live console window?`n`nThis can take a long time. System drive repairs may be scheduled for next reboot.", "Confirm CHKDSK", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
     if ($confirm -ne "Yes") { return }
-    Invoke-UiCommand {
-        $drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $null -ne $_.Free } | Select-Object -ExpandProperty Name
-        foreach ($drive in $drives) {
-            Write-Output "Scanning drive $drive`:"
-            chkdsk "${drive}:" /f /r /x
+    Start-ChkdskConsole
+}
+
+function Start-ChkdskConsole {
+    $consoleScript = @'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$ErrorActionPreference = "Continue"
+
+Write-Host "WMT: CHKDSK started at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Host ""
+
+$drives = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+    Where-Object { $null -ne $_.Free } |
+    Select-Object -ExpandProperty Name -Unique |
+    Sort-Object
+
+if (-not $drives -or $drives.Count -eq 0) {
+    Write-Host "No file-system drives detected."
+    Write-Host ""
+    [void](Read-Host "Press Enter to close")
+    exit
+}
+
+$systemDrive = (($env:SystemDrive -replace ":", "")).ToUpperInvariant()
+$ok = 0
+$fail = 0
+
+foreach ($drive in $drives) {
+    $letter = ([string]$drive).TrimEnd(":").ToUpperInvariant()
+    $target = "$letter`:"
+
+    Write-Host ""
+    Write-Host "[$target] Running CHKDSK..."
+
+    try {
+        if ($letter -eq $systemDrive) {
+            Write-Host "[$target] System drive detected. Auto-answering schedule prompt with 'Y' if required."
+            $out = cmd.exe /c "echo Y|chkdsk $target /f /r" 2>&1
+        } else {
+            $out = cmd.exe /c "chkdsk $target /f /r /x" 2>&1
         }
-    } "Running CHKDSK on all drives..."
+
+        $exitCode = $LASTEXITCODE
+        if ($out) { $out | ForEach-Object { if ($_ -ne $null) { Write-Host $_ } } }
+
+        if ($exitCode -eq 0) {
+            Write-Host "[$target] Completed (exit 0)."
+            $ok++
+        } else {
+            Write-Warning "[$target] Completed with exit code $exitCode."
+            if ($letter -eq $systemDrive) {
+                Write-Host "[$target] Note: System drive checks commonly require reboot scheduling."
+            }
+            $fail++
+        }
+    } catch {
+        Write-Warning "[$target] Failed: $($_.Exception.Message)"
+        $fail++
+    }
+}
+
+Write-Host ""
+Write-Host "Summary: completed_ok=$ok, completed_with_warnings=$fail"
+Write-Host ""
+[void](Read-Host "Press Enter to close")
+'@
+
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($consoleScript))
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -WindowStyle Normal
+    Write-GuiLog "[CHKDSK] Opened live CHKDSK console window."
 }
 # ==========================================
 # WINAPP2.INI INTEGRATION
@@ -4460,6 +4590,7 @@ function Show-TaskManager {
                                         <ProgressBar Name="pbWingetProgress" Width="260" Height="8" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
                                         <TextBlock Name="lblWingetProgress" Text="" Margin="10,0,0,0" Foreground="{StaticResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
                                     </StackPanel>
+                                    <TextBlock Name="lblWingetLastResult" Text="" Margin="0,6,0,0" Foreground="{StaticResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
                                 </StackPanel>
                             </StackPanel>
                             <Grid Grid.Column="1">
@@ -5205,6 +5336,7 @@ $lblWingetStatus = Get-Ctrl "lblWingetStatus"
 $lblWingetTitle = Get-Ctrl "lblWingetTitle"
 $pbWingetProgress = Get-Ctrl "pbWingetProgress"
 $lblWingetProgress = Get-Ctrl "lblWingetProgress"
+$lblWingetLastResult = Get-Ctrl "lblWingetLastResult"
 $cmbPackageManager = Get-Ctrl "cmbPackageManager"
 if ($cmbPackageManager) {
     $cmbPackageManager.Add_SelectionChanged({ 
@@ -5594,6 +5726,7 @@ $Script:StartWingetAction = {
     $script:WingetProgressSkipped = 0
     $script:WingetProgressFailed = 0
     $script:WingetCurrentIndex = 0
+    $script:WingetCurrentPercent = 0
     $script:WingetCurrentItemName = ""
     $script:WingetCompletedIndexes = @{}
     if ($pbWingetProgress) {
@@ -5606,6 +5739,62 @@ $Script:StartWingetAction = {
     if ($lblWingetProgress) {
         $lblWingetProgress.Text = "0/$totalItems done | 0 success | 0 skipped | 0 failed"
         $lblWingetProgress.Visibility = "Visible"
+    }
+    if ($lblWingetLastResult) {
+        $lblWingetLastResult.Text = ""
+        $lblWingetLastResult.Visibility = "Collapsed"
+    }
+
+    $refreshWingetProgressUi = {
+        $total = [Math]::Max(1, [int]$script:WingetProgressTotal)
+        $done = [Math]::Max(0, [int]$script:WingetProgressDone)
+        $success = [Math]::Max(0, [int]$script:WingetProgressSuccess)
+        $skipped = [Math]::Max(0, [int]$script:WingetProgressSkipped)
+        $failed = [Math]::Max(0, [int]$script:WingetProgressFailed)
+        $curIdx = [Math]::Max(0, [int]$script:WingetCurrentIndex)
+        $curPct = [Math]::Max(0, [Math]::Min(100, [int]$script:WingetCurrentPercent))
+
+        if ($pbWingetProgress) {
+            $value = [double]$done
+            if ($curIdx -gt 0 -and $done -lt $total) {
+                $base = [Math]::Max($done, $curIdx - 1)
+                $value = [Math]::Min([double]$total, [double]$base + ($curPct / 100.0))
+            }
+            $pbWingetProgress.Value = $value
+        }
+
+        if ($lblWingetProgress) {
+            $running = ""
+            if ($curIdx -gt 0 -and $done -lt $total) {
+                $running = " | running $curIdx/$total"
+                if ($curPct -gt 0) { $running += " ($curPct%)" }
+            }
+            $lblWingetProgress.Text = "$done/$total done | $success success | $skipped skipped | $failed failed$running"
+        }
+    }
+    & $refreshWingetProgressUi
+
+    $setWingetLastResultUi = {
+        param(
+            [string]$ResultCode,
+            [string]$PackageName,
+            [int]$DoneIndex,
+            [int]$TotalCount
+        )
+        if (-not $lblWingetLastResult) { return }
+
+        $text = "Last: [$ResultCode] $DoneIndex/$TotalCount - $PackageName"
+        $brush = [System.Windows.Media.Brushes]::LightGray
+        switch ($ResultCode) {
+            "SUCCESS"   { $brush = [System.Windows.Media.Brushes]::LightGreen }
+            "SKIPPED"   { $brush = [System.Windows.Media.Brushes]::Gold }
+            "CANCELLED" { $brush = [System.Windows.Media.Brushes]::Orange }
+            "FAILED"    { $brush = [System.Windows.Media.Brushes]::Tomato }
+        }
+
+        $lblWingetLastResult.Text = $text
+        $lblWingetLastResult.Foreground = $brush
+        $lblWingetLastResult.Visibility = "Visible"
     }
     
     # 1. Define the Job Arguments
@@ -5985,6 +6174,7 @@ timeout /t 5
             if ($line -match "^RESULT:(\d+):(SUCCESS|SKIPPED|FAILED|CANCELLED):(.*)$") {
                 $doneIndex = [int]$matches[1]
                 $result = $matches[2]
+                $resultName = $matches[3]
                 if (-not $script:WingetCompletedIndexes.ContainsKey($doneIndex)) {
                     $script:WingetCompletedIndexes[$doneIndex] = $true
                     $script:WingetProgressDone++
@@ -5997,10 +6187,9 @@ timeout /t 5
                     else {
                         $script:WingetProgressFailed++
                     }
-                    if ($pbWingetProgress) { $pbWingetProgress.Value = [Math]::Min($pbWingetProgress.Maximum, $script:WingetProgressDone) }
-                    if ($lblWingetProgress) {
-                        $lblWingetProgress.Text = "$($script:WingetProgressDone)/$($script:WingetProgressTotal) done | $($script:WingetProgressSuccess) success | $($script:WingetProgressSkipped) skipped | $($script:WingetProgressFailed) failed"
-                    }
+                    if ($doneIndex -eq $script:WingetCurrentIndex) { $script:WingetCurrentPercent = 0 }
+                    & $setWingetLastResultUi $result $resultName $doneIndex $script:WingetProgressTotal
+                    & $refreshWingetProgressUi
                 }
                 continue
             }
@@ -6009,15 +6198,18 @@ timeout /t 5
                 $t = [int]$matches[2]
                 $n = $matches[3]
                 $script:WingetCurrentIndex = $i
+                $script:WingetCurrentPercent = 0
                 $script:WingetCurrentItemName = $n
                 $lblWingetStatus.Text = "$($script:WingetActiveAction) ${i}/${t}: $n"
-                if ($pbWingetProgress -and $i -gt 1 -and $pbWingetProgress.Value -lt ($i - 1)) {
-                    $pbWingetProgress.Value = $i - 1
-                }
+                & $refreshWingetProgressUi
                 continue
             }
             if ($line -match "^LOG:(.*)") {
                 $logMsg = $matches[1].Trim()
+                if ($logMsg -match "^\[winget\]\s+Progress:\s*(\d+)%$") {
+                    $script:WingetCurrentPercent = [int]$matches[1]
+                    & $refreshWingetProgressUi
+                }
                 if ($logMsg -match "^\[[^\]]+\]\[(\d+)/(\d+)\]\s+(SUCCESS|SKIPPED|FAILED|CANCELLED)\b") {
                     $doneIndex = [int]$matches[1]
                     $result = $matches[3]
@@ -6033,10 +6225,9 @@ timeout /t 5
                         else {
                             $script:WingetProgressFailed++
                         }
-                        if ($pbWingetProgress) { $pbWingetProgress.Value = [Math]::Min($pbWingetProgress.Maximum, $script:WingetProgressDone) }
-                        if ($lblWingetProgress) {
-                            $lblWingetProgress.Text = "$($script:WingetProgressDone)/$($script:WingetProgressTotal) done | $($script:WingetProgressSuccess) success | $($script:WingetProgressSkipped) skipped | $($script:WingetProgressFailed) failed"
-                        }
+                        if ($doneIndex -eq $script:WingetCurrentIndex) { $script:WingetCurrentPercent = 0 }
+                        & $setWingetLastResultUi $result $script:WingetCurrentItemName $doneIndex $script:WingetProgressTotal
+                        & $refreshWingetProgressUi
                     }
                 }
                 Write-GuiLog $logMsg
@@ -6076,10 +6267,9 @@ timeout /t 5
                 $lblWingetStatus.Text = "$($script:WingetActiveAction) completed. $($script:WingetProgressDone)/$($script:WingetProgressTotal) done."
                 Write-GuiLog "[$($script:WingetActiveAction)] Completed."
             }
-            if ($pbWingetProgress) { $pbWingetProgress.Value = $script:WingetProgressDone }
-            if ($lblWingetProgress) {
-                $lblWingetProgress.Text = "$($script:WingetProgressDone)/$($script:WingetProgressTotal) done | $($script:WingetProgressSuccess) success | $($script:WingetProgressSkipped) skipped | $($script:WingetProgressFailed) failed"
-            }
+            $script:WingetCurrentIndex = 0
+            $script:WingetCurrentPercent = 0
+            & $refreshWingetProgressUi
             $btnWingetScan.IsEnabled = $true
             $btnWingetUpdateSel.IsEnabled = $true
             if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
@@ -6317,6 +6507,7 @@ $btnWingetScan.Add_Click({
     $lblWingetStatus.Visibility = "Visible"
     if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
     if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
+    if ($lblWingetLastResult) { $lblWingetLastResult.Visibility = "Collapsed"; $lblWingetLastResult.Text = "" }
     $lstWinget.Items.Clear()
     $btnWingetScan.IsEnabled = $false
     if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $false }
@@ -6337,76 +6528,84 @@ $btnWingetScan.Add_Click({
 
     # --- DEFINE PROVIDER WORKERS ---
 
-    # A. WINGET & MSSTORE WORKER
-    if ("winget" -in $enabled -or "msstore" -in $enabled) {
+    # A. WINGET / MSSTORE WORKERS (split per source to avoid cross-source timeout stalls)
+    foreach ($wingetSource in @("winget","msstore")) {
+        if ($wingetSource -notin $enabled) { continue }
+
         $ps = [PowerShell]::Create()
         [void]$ps.AddScript({
-            param($Enabled, $IgnoreList)
+            param($SourceName, $IgnoreList)
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
             function Test-Ignored($n, $i) {
                 if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
                 return $false
             }
 
-            # WINGET / MSSTORE
-            # REMOVED: --include-unknown (causes hangs on apps with unknown versions)
-            # ADDED: --disable-interactivity to prevent any prompts
-            $wArgs = "list --upgrade-available --accept-source-agreements --disable-interactivity"
-            if ("msstore" -notin $Enabled) { $wArgs += " --source winget" }
-            
+            Write-Output "LOG:Scanning $SourceName..."
+
+            # Keep sources isolated so msstore cannot block winget results.
+            $wArgs = "list --upgrade-available --accept-source-agreements --disable-interactivity --source $SourceName"
+            # Win10 source refresh can be slower; keep independent but less aggressive time budgets.
+            $timeoutMs = if ($SourceName -eq "msstore") { 180000 } else { 120000 }
+
             try {
                 $pInfo = New-Object System.Diagnostics.ProcessStartInfo
                 $pInfo.FileName = "winget"
                 $pInfo.Arguments = $wArgs
                 $pInfo.RedirectStandardOutput = $true
-                $pInfo.RedirectStandardError = $true
+                # Avoid stderr pipe backpressure deadlocks during source scans.
+                $pInfo.RedirectStandardError = $false
                 $pInfo.UseShellExecute = $false
                 $pInfo.CreateNoWindow = $true
                 $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-                
+
                 $p = [System.Diagnostics.Process]::Start($pInfo)
-                # ADDED: 60 second timeout to prevent hanging forever
-                if (-not $p.WaitForExit(60000)) {
-                    Write-Output "LOG:Winget scan timed out after 60 seconds."
+                if (-not $p.WaitForExit($timeoutMs)) {
+                    Write-Output "LOG:$SourceName scan timed out after $([int]($timeoutMs / 1000)) seconds."
                     try { $p.Kill() } catch {}
                     return
                 }
                 $out = $p.StandardOutput.ReadToEnd()
-                
+                if ($p.ExitCode -ne 0) {
+                    Write-Output "LOG:$SourceName scan exited with code $($p.ExitCode)."
+                }
+
                 if (-not [string]::IsNullOrWhiteSpace($out)) {
                     $lines = $out -split "`r`n"
                     $idxId = -1
-                    foreach($l in $lines){ if($l -match "Name\s+Id\s+Version"){$idxId=$l.IndexOf("Id"); break} }
+                    foreach ($l in $lines) { if ($l -match "Name\s+Id\s+Version") { $idxId = $l.IndexOf("Id"); break } }
 
-                    foreach($line in $lines){
-                        $line=$line.Trim()
-                        if(!$line -or $line -match "^-+" -or $line -match "^Name\s+Id"){continue}
-                        # Filter winget status messages that look like data rows
-                        if($line -match "explicit targeting" -or $line -match "following packages have an upgrade available"){continue}
-                        $n=$null;$i=$null;$v=$null;$a=$null;$s="winget"
-                        
-                        if($idxId -gt 0 -and $line.Length -gt $idxId){
-                            $n=$line.Substring(0,$idxId).Trim(); $rest=$line.Substring($idxId).Trim(); $parts=$rest -split "\s+"
-                            if($parts.Count -ge 4){$i=$parts[0];$v=$parts[1];$a=$parts[2];$s=$parts[3]}
-                            elseif($parts.Count -ge 3){$i=$parts[0];$v=$parts[1];$a=$parts[2]}
+                    foreach ($line in $lines) {
+                        $line = $line.Trim()
+                        if (!$line -or $line -match "^-+" -or $line -match "^Name\s+Id") { continue }
+                        if ($line -match "explicit targeting" -or $line -match "following packages have an upgrade available") { continue }
+
+                        $n = $null; $i = $null; $v = $null; $a = $null
+
+                        if ($idxId -gt 0 -and $line.Length -gt $idxId) {
+                            $n = $line.Substring(0, $idxId).Trim()
+                            $rest = $line.Substring($idxId).Trim()
+                            $parts = $rest -split "\s+"
+                            if ($parts.Count -ge 4) { $i = $parts[0]; $v = $parts[1]; $a = $parts[2] }
+                            elseif ($parts.Count -ge 3) { $i = $parts[0]; $v = $parts[1]; $a = $parts[2] }
                         }
-                        if(!$n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)'){
-                            $n=$matches[1].Trim();$i=$matches[2].Trim();$v=$matches[3].Trim();$a=$matches[4].Trim();$s=$matches[5].Trim()
+                        if (!$n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)') {
+                            $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim(); $a = $matches[4].Trim()
                         }
-                        if($n -and $i -and $i.Length -gt 2){
-                            # CHANGED: Updated function call here
-                            if(Test-Ignored $n $i){continue}
-                            
-                            if($s -eq "msstore"){$s="msstore"}else{$s="winget"}
-                            if($v -eq "Unknown"){$v="?"}
-                            [PSCustomObject]@{Source=$s;Name=$n;Id=$i;Version=$v;Available=$a}
+                        if ($n -and $i -and $i.Length -gt 2) {
+                            if (Test-Ignored $n $i) { continue }
+                            if ($v -eq "Unknown") { $v = "?" }
+                            [PSCustomObject]@{ Source = $SourceName; Name = $n; Id = $i; Version = $v; Available = $a }
                         }
                     }
                 }
-            } catch { Write-Output "LOG:Winget check failed." }
-        }).AddArgument($enabled).AddArgument($ignoreList)
-        
-        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
+            } catch {
+                Write-Output "LOG:$SourceName check failed."
+            }
+        }).AddArgument($wingetSource).AddArgument($ignoreList)
+
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
     }
 
     # B. PIP WORKER
