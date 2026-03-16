@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v5.0.5-green)
+![Version](https://img.shields.io/badge/version-v5.1-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -9,9 +9,7 @@ All-in-one Windows maintenance and optimization toolkit. Features system repair,
 ---
 
 ## 📸 Screenshots
-<img width="1414" height="885" alt="image" src="https://github.com/user-attachments/assets/ef077027-1158-49cc-9fc5-aca0ff85dc45" />
-
-
+<img width="1918" height="1007" alt="image" src="https://github.com/user-attachments/assets/941fee01-31ed-471d-a2ce-1ec94ab349e0" />
 
 ---
 
