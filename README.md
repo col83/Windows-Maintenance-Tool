@@ -164,7 +164,7 @@ MIT Licensed — see [LICENSE](LICENSE).
 
 - [MSS Mac Service Script](https://github.com/ios12checker/MSS-Mac-Service-Script)
 - [Winrar Patcher](https://github.com/ios12checker/Winrar-Patcher)
-
+- [SpotiPatcher](https://github.com/ios12checker/SpotiPatch)
 ---
 
 ## 💬 Community
