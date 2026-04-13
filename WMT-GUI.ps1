@@ -4243,8 +4243,17 @@ function Show-TaskManager {
 # --- WINRE STATUS CHECK ---
 function Invoke-WinREStatusCheck {
     Invoke-UiCommand {
+        # 1. FIX THE ENCODING
+        # Temporarily force PowerShell to read this specific native command in OEM
+        $oldEnc = [Console]::OutputEncoding
+        [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+        
         $raw = & reagentc.exe /info 2>&1
         $exitCode = $LASTEXITCODE
+        
+        # Restore original encoding immediately after
+        [Console]::OutputEncoding = $oldEnc
+
         $text = ($raw | Out-String).Trim()
         if ([string]::IsNullOrWhiteSpace($text)) {
             $text = "No output returned from reagentc /info."
@@ -4252,17 +4261,23 @@ function Invoke-WinREStatusCheck {
 
         $status = "Unknown"
         $location = "Unknown"
-        if ($text -match '(?im)^\s*Windows RE status:\s*(.+)$') {
+        
+        # 2. FIX THE REGEX (Bilingual Support)
+        # Matches English "Windows RE status:" OR French "État de l'environnement..."
+        if ($text -match '(?im)^\s*(?:Windows RE status|.*tat de[^:]+):\s*(.+)$') {
             $status = $matches[1].Trim()
         }
-        if ($text -match '(?im)^\s*Windows RE location:\s*(.+)$') {
+        if ($text -match '(?im)^\s*(?:Windows RE location|Emplacement[^:]+):\s*(.+)$') {
             $location = $matches[1].Trim()
         }
 
         $warnings = New-Object System.Collections.Generic.List[string]
         if ($exitCode -ne 0) { [void]$warnings.Add("reagentc returned exit code: $exitCode") }
-        if ($status -notmatch '(?i)^enabled$') { [void]$warnings.Add("Windows RE is not enabled.") }
-        if ($location -match '(?i)unknown|not set|n/a') { [void]$warnings.Add("Recovery location is not configured correctly.") }
+        
+        # 3. FIX THE HEALTH CHECK (Bilingual Support)
+        # Check for English "Enabled" or French "Activé"
+        if ($status -notmatch '(?i)^(enabled|activé|activ\w+)$') { [void]$warnings.Add("Windows RE is not enabled.") }
+        if ($location -match '(?i)unknown|inconnu|not set|n/a') { [void]$warnings.Add("Recovery location is not configured correctly.") }
 
         $health = if ($warnings.Count -eq 0) { "OK" } else { "Needs Attention" }
         $headline = if ($warnings.Count -eq 0) { "WinRE looks healthy." } else { "WinRE needs attention." }
