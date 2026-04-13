@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.1"
+$AppVersion = "5.2"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -4238,6 +4238,1036 @@ function Show-TaskManager {
     & $LoadTasks; $f.ShowDialog()
 }
 
+# --- WINRE STATUS CHECK ---
+function Invoke-WinREStatusCheck {
+    Invoke-UiCommand {
+        $raw = & reagentc.exe /info 2>&1
+        $exitCode = $LASTEXITCODE
+        $text = ($raw | Out-String).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            $text = "No output returned from reagentc /info."
+        }
+
+        $status = "Unknown"
+        $location = "Unknown"
+        if ($text -match '(?im)^\s*Windows RE status:\s*(.+)$') {
+            $status = $matches[1].Trim()
+        }
+        if ($text -match '(?im)^\s*Windows RE location:\s*(.+)$') {
+            $location = $matches[1].Trim()
+        }
+
+        $warnings = New-Object System.Collections.Generic.List[string]
+        if ($exitCode -ne 0) { [void]$warnings.Add("reagentc returned exit code: $exitCode") }
+        if ($status -notmatch '(?i)^enabled$') { [void]$warnings.Add("Windows RE is not enabled.") }
+        if ($location -match '(?i)unknown|not set|n/a') { [void]$warnings.Add("Recovery location is not configured correctly.") }
+
+        $health = if ($warnings.Count -eq 0) { "OK" } else { "Needs Attention" }
+        $headline = if ($warnings.Count -eq 0) { "WinRE looks healthy." } else { "WinRE needs attention." }
+
+        $summary = @(
+            "Windows Recovery Environment (WinRE)",
+            "Checked: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+            "",
+            "Health: $health",
+            "Status: $status",
+            "Location: $location",
+            ""
+        )
+
+        if ($warnings.Count -gt 0) {
+            $summary += "What to check next:"
+            foreach ($w in $warnings) { $summary += " - $w" }
+            $summary += ""
+            $summary += "Tip: You can usually fix this with:"
+            $summary += " - reagentc /disable"
+            $summary += " - reagentc /enable"
+        } else {
+            $summary += "No immediate issues found."
+        }
+
+        $msg = ($summary -join "`r`n")
+        Write-Output $msg
+
+        $icon = if ($warnings.Count -eq 0) { 
+            [System.Windows.Forms.MessageBoxIcon]::Information 
+        } else { 
+            [System.Windows.Forms.MessageBoxIcon]::Warning 
+        }
+
+        $res = [System.Windows.Forms.MessageBox]::Show(
+            "$headline`r`n`r`n$msg`r`n`r`nShow technical details?",
+            "WinRE Status",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            $icon
+        )
+
+        if ($res -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Show-TextDialog -Title "WinRE Technical Details" -Text $text
+        }
+    } "Checking WinRE status..."
+}
+
+function Invoke-QuickFixSuite {
+    $confirmMsg = @"
+Run Quick Fix now?
+
+This will run:
+1) SFC /SCANNOW
+2) DISM /CheckHealth
+3) DISM /RestoreHealth
+4) Temp cleanup (User + Windows Temp)
+
+
+It can take a while.
+"@
+    $res = [System.Windows.MessageBox]::Show(
+        $confirmMsg,
+        "Quick Fix",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Question
+    )
+    if ($res -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+    $runner = @'
+$ErrorActionPreference = "Continue"
+$ProgressPreference = "Continue"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+Write-Host ("WMT Quick Fix started at {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "[1/4] Running SFC /SCANNOW..." -ForegroundColor Yellow
+sfc /scannow
+$sfcCode = $LASTEXITCODE
+
+Write-Host ""
+Write-Host "[2/4] Running DISM /Online /Cleanup-Image /CheckHealth..." -ForegroundColor Yellow
+dism /online /cleanup-image /checkhealth
+$dismCheckCode = $LASTEXITCODE
+
+Write-Host ""
+Write-Host "[3/4] Running DISM /Online /Cleanup-Image /RestoreHealth..." -ForegroundColor Yellow
+dism /online /cleanup-image /restorehealth
+$dismRestoreCode = $LASTEXITCODE
+
+Write-Host ""
+Write-Host "[4/4] Cleaning temporary files..." -ForegroundColor Yellow
+$targets = @($env:TEMP, "$env:SystemRoot\Temp")
+$deletedCount = 0
+$deletedBytes = 0
+foreach ($path in $targets) {
+    if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
+    try {
+        Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                if (-not $_.PSIsContainer) {
+                    $deletedBytes += $_.Length
+                    $deletedCount++
+                }
+                Remove-Item -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
+            } catch {}
+        }
+    } catch {}
+}
+$tempMb = [math]::Round(($deletedBytes / 1MB), 2)
+Write-Host ("Temp cleanup done: {0} item(s), ~{1} MB reclaimed." -f $deletedCount, $tempMb) -ForegroundColor Gray
+
+Write-Host ""
+Write-Host "Quick Fix finished." -ForegroundColor Green
+Write-Host ("Exit codes -> SFC: {0} | DISM Check: {1} | DISM Restore: {2}" -f $sfcCode, $dismCheckCode, $dismRestoreCode) -ForegroundColor Gray
+Write-Host ""
+Write-Host ""
+Write-Host "Tip: If needed, run CHKDSK separately from the CHKDSK button in System Health." -ForegroundColor DarkGray
+Write-Host "Closing in 8 seconds..." -ForegroundColor Gray
+Start-Sleep -Seconds 8
+'@
+
+    try {
+        $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($runner))
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -Verb RunAs -WindowStyle Normal
+        Write-GuiLog "Quick Fix launched (SFC + DISM + Temp cleanup)."
+    } catch {
+        Write-GuiLog "Quick Fix launch failed: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show(
+            "Could not start Quick Fix: $($_.Exception.Message)",
+            "Quick Fix",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Error
+        ) | Out-Null
+    }
+}
+
+# --- SYSTEM RESTORE MANAGER ---
+function Show-SystemRestoreManager {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "System Restore Manager"
+    $f.Size = "980, 580"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.ForeColor = [System.Drawing.Color]::White
+
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.Dock = "Top"
+    $dg.Height = 440
+    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.ForeColor = [System.Drawing.Color]::White
+    $dg.AutoSizeColumnsMode = "Fill"
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $true
+    $dg.ReadOnly = $true
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.BorderStyle = "None"
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
+    $dg.ColumnHeadersHeight = 32
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
+    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
+    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
+    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    $f.Controls.Add($dg)
+
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 90
+    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.Controls.Add($pnl)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Restore points: loading..."
+    $lbl.AutoSize = $true
+    $lbl.Left = 20
+    $lbl.Top = 8
+    $lbl.ForeColor = [System.Drawing.Color]::LightGray
+    $pnl.Controls.Add($lbl)
+
+    function New-RestoreBtn($text,$x,$color=$null){
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $text
+        $b.Left = $x; $b.Top = 35; $b.Width = 145; $b.Height = 38
+        $b.FlatStyle = "Flat"
+        $b.FlatAppearance.BorderSize = 1
+        $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#444444")
+        $b.ForeColor = [System.Drawing.Color]::White
+        if($color){
+            $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml($color)
+            $b.FlatAppearance.MouseOverBackColor=[System.Windows.Forms.ControlPaint]::Light($b.BackColor)
+        } else {
+            $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+            $b.FlatAppearance.MouseOverBackColor=[System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
+        }
+        $pnl.Controls.Add($b)
+        return $b
+    }
+
+    $btnRefresh = New-RestoreBtn "Refresh" 20
+    $btnCreate = New-RestoreBtn "Create Point" 180 "#006600"
+    $btnDelete = New-RestoreBtn "Delete Selected" 340 "#802020"
+    $btnOpenUi = New-RestoreBtn "Open Restore UI" 500
+    $btnClose = New-RestoreBtn "Close" 660
+
+    $script:RestorePointRows = @()
+
+    $LoadRestorePoints = {
+        $list = @()
+        try {
+            $list = Get-ComputerRestorePoint | Sort-Object SequenceNumber -Descending
+        } catch {}
+
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("SequenceNumber")
+        $dt.Columns.Add("Description")
+        $dt.Columns.Add("Type")
+        $dt.Columns.Add("Created")
+        $dt.Columns.Add("RawTime")
+
+        foreach ($rp in $list) {
+            $created = $rp.CreationTime
+            try { $created = [System.Management.ManagementDateTimeConverter]::ToDateTime($rp.CreationTime) } catch {}
+            $r = $dt.NewRow()
+            $r["SequenceNumber"] = $rp.SequenceNumber
+            $r["Description"] = $rp.Description
+            $r["Type"] = $rp.EventType
+            $r["Created"] = $created
+            $r["RawTime"] = $rp.CreationTime
+            $dt.Rows.Add($r)
+        }
+
+        $dg.DataSource = $dt
+        if ($dg.Columns["RawTime"]) { $dg.Columns["RawTime"].Visible = $false }
+        $dg.ClearSelection()
+        $lbl.Text = "Restore points: $($dt.Rows.Count)"
+    }
+
+    $btnRefresh.Add_Click({ & $LoadRestorePoints })
+    $btnCreate.Add_Click({
+        $desc = [Microsoft.VisualBasic.Interaction]::InputBox("Description for the restore point:", "Create Restore Point", "WMT Manual Restore Point")
+        if ([string]::IsNullOrWhiteSpace($desc)) { return }
+        try {
+            Checkpoint-Computer -Description $desc -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop | Out-Null
+            [System.Windows.Forms.MessageBox]::Show("Restore point created.","System Restore Manager","OK","Information") | Out-Null
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Failed to create restore point.`n$($_.Exception.Message)","System Restore Manager","OK","Error") | Out-Null
+        }
+        & $LoadRestorePoints
+    })
+    $btnDelete.Add_Click({
+        if ($dg.SelectedRows.Count -eq 0) { return }
+        $count = $dg.SelectedRows.Count
+        $res = [System.Windows.Forms.MessageBox]::Show("Delete $count selected restore point(s)?","Confirm Delete",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($res -ne "Yes") { return }
+
+        $ok = 0
+        $fail = 0
+        $sysRestore = $null
+        try { $sysRestore = [WMIClass]"root/default:SystemRestore" } catch {}
+        if (-not $sysRestore) {
+            [System.Windows.Forms.MessageBox]::Show("Could not access SystemRestore WMI class.","System Restore Manager","OK","Error") | Out-Null
+            return
+        }
+
+        foreach ($row in $dg.SelectedRows) {
+            $seq = 0
+            try { $seq = [int]$row.Cells["SequenceNumber"].Value } catch {}
+            if ($seq -le 0) { $fail++; continue }
+            try {
+                $ret = $sysRestore.RemoveRestorePoint($seq)
+                if ($ret.ReturnValue -eq 0) { $ok++ } else { $fail++ }
+            } catch { $fail++ }
+        }
+        [System.Windows.Forms.MessageBox]::Show("Deleted: $ok`nFailed: $fail","System Restore Manager","OK","Information") | Out-Null
+        & $LoadRestorePoints
+    })
+    $btnOpenUi.Add_Click({ Start-Process "rstrui.exe" })
+    $btnClose.Add_Click({ $f.Close() })
+
+    & $LoadRestorePoints
+    $f.ShowDialog() | Out-Null
+}
+
+# --- STARTUP MANAGER (Windows / Tasks / Context Menu / Services) ---
+function Show-StartupManager {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Startup Manager"
+    $f.Size = "1220, 720"
+    $f.MinimumSize = "1020,600"
+    $f.StartPosition = "CenterScreen"
+    $f.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1A1C21")
+    $f.ForeColor = [System.Drawing.Color]::White
+
+    $clrBg = [System.Drawing.ColorTranslator]::FromHtml("#1A1C21")
+    $clrPanel = [System.Drawing.ColorTranslator]::FromHtml("#202329")
+    $clrElev = [System.Drawing.ColorTranslator]::FromHtml("#252932")
+    $clrLine = [System.Drawing.ColorTranslator]::FromHtml("#2F3540")
+    $clrText = [System.Drawing.Color]::White
+    $clrTextMuted = [System.Drawing.ColorTranslator]::FromHtml("#A7AFBA")
+    $clrAccent = [System.Drawing.ColorTranslator]::FromHtml("#00B7FF")
+    $clrSel = [System.Drawing.ColorTranslator]::FromHtml("#0095E0")
+
+    $tabs = New-Object System.Windows.Forms.TabControl
+    $tabs.Dock = "Fill"
+    $tabs.Padding = New-Object System.Drawing.Point(14, 8)
+    $tabs.SizeMode = [System.Windows.Forms.TabSizeMode]::Fixed
+    $tabs.ItemSize = New-Object System.Drawing.Size(170, 30)
+    $tabs.Appearance = [System.Windows.Forms.TabAppearance]::Buttons
+    $tabs.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9)
+    $tabs.DrawMode = [System.Windows.Forms.TabDrawMode]::OwnerDrawFixed
+    $tabs.BackColor = $clrBg
+    $tabs.Add_DrawItem({
+        param($tabCtrl, $e)
+        if ($e.Index -lt 0 -or $e.Index -ge $tabCtrl.TabPages.Count) { return }
+        $g = $e.Graphics
+        $rect = $tabCtrl.GetTabRect($e.Index)
+        $isSelected = ($tabCtrl.SelectedIndex -eq $e.Index)
+
+        $bgColor = if ($isSelected) { $clrElev } else { $clrPanel }
+        $bgBrush = New-Object System.Drawing.SolidBrush $bgColor
+        $linePen = New-Object System.Drawing.Pen $clrLine
+        $textColor = if ($isSelected) { $clrText } else { $clrTextMuted }
+        $textBrush = New-Object System.Drawing.SolidBrush $textColor
+        $accentPen = New-Object System.Drawing.Pen $clrAccent, 2
+        $sf = New-Object System.Drawing.StringFormat
+        $sf.Alignment = [System.Drawing.StringAlignment]::Center
+        $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+
+        $g.FillRectangle($bgBrush, $rect)
+        $g.DrawRectangle($linePen, $rect.X, $rect.Y, $rect.Width - 1, $rect.Height - 1)
+        if ($isSelected) {
+            $g.DrawLine($accentPen, $rect.X + 10, $rect.Bottom - 2, $rect.Right - 10, $rect.Bottom - 2)
+        }
+        $g.DrawString($tabCtrl.TabPages[$e.Index].Text, $tabCtrl.Font, $textBrush, [System.Drawing.RectangleF]$rect, $sf)
+
+        $sf.Dispose()
+        $bgBrush.Dispose()
+        $linePen.Dispose()
+        $textBrush.Dispose()
+        $accentPen.Dispose()
+    }.GetNewClosure())
+    $f.Controls.Add($tabs)
+
+    function New-TabPage([string]$title) {
+        $tp = New-Object System.Windows.Forms.TabPage
+        $tp.Text = $title
+        $tp.BackColor = $clrBg
+        $tp.ForeColor = $clrText
+        $tp.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
+
+        $top = New-Object System.Windows.Forms.Panel
+        $top.Dock = "Top"
+        $top.Height = 48
+        $top.BackColor = $clrPanel
+        $tp.Controls.Add($top)
+
+        $topLine = New-Object System.Windows.Forms.Panel
+        $topLine.Dock = "Bottom"
+        $topLine.Height = 1
+        $topLine.BackColor = $clrLine
+        $top.Controls.Add($topLine)
+
+        $lblSearch = New-Object System.Windows.Forms.Label
+        $lblSearch.Text = "Search:"
+        $lblSearch.Left = 14
+        $lblSearch.Top = 16
+        $lblSearch.AutoSize = $true
+        $lblSearch.ForeColor = $clrText
+        $lblSearch.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9)
+        $top.Controls.Add($lblSearch)
+
+        $txtSearch = New-Object System.Windows.Forms.TextBox
+        $txtSearch.Left = 70
+        $txtSearch.Top = 11
+        $txtSearch.Width = 360
+        $txtSearch.BorderStyle = "FixedSingle"
+        $txtSearch.BackColor = $clrBg
+        $txtSearch.ForeColor = $clrText
+        $txtSearch.Anchor = "Top, Left"
+        $top.Controls.Add($txtSearch)
+
+        $btnClear = New-Object System.Windows.Forms.Button
+        $btnClear.Text = "Clear"
+        $btnClear.Left = 438
+        $btnClear.Top = 10
+        $btnClear.Width = 70
+        $btnClear.Height = 26
+        $btnClear.FlatStyle = "Flat"
+        $btnClear.FlatAppearance.BorderSize = 1
+        $btnClear.FlatAppearance.BorderColor = $clrLine
+        $btnClear.BackColor = $clrElev
+        $btnClear.ForeColor = $clrText
+        $btnClear.Anchor = "Top, Left"
+        $btnClear.Add_Click({ $txtSearch.Text = "" })
+        $top.Controls.Add($btnClear)
+
+        $lblCount = New-Object System.Windows.Forms.Label
+        $lblCount.Text = "0 items"
+        $lblCount.AutoSize = $true
+        $lblCount.Left = 520
+        $lblCount.Top = 16
+        $lblCount.ForeColor = $clrTextMuted
+        $lblCount.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $top.Controls.Add($lblCount)
+
+        $pnl = New-Object System.Windows.Forms.Panel
+        $pnl.Dock = "Bottom"
+        $pnl.Height = 74
+        $pnl.BackColor = $clrPanel
+        $tp.Controls.Add($pnl)
+
+        $botLine = New-Object System.Windows.Forms.Panel
+        $botLine.Dock = "Top"
+        $botLine.Height = 1
+        $botLine.BackColor = $clrLine
+        $pnl.Controls.Add($botLine)
+
+        $dg = New-Object System.Windows.Forms.DataGridView
+        $dg.Dock = "Fill"
+        $dg.BackgroundColor = $clrBg
+        $dg.ForeColor = $clrText
+        $dg.AutoSizeColumnsMode = "Fill"
+        $dg.AutoGenerateColumns = $true
+        $dg.ColumnHeadersVisible = $true
+        $dg.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
+        $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
+        $dg.SelectionMode = "FullRowSelect"
+        $dg.MultiSelect = $true
+        $dg.ReadOnly = $true
+        $dg.RowHeadersVisible = $false
+        $dg.AllowUserToAddRows = $false
+        $dg.BorderStyle = "None"
+        $dg.CellBorderStyle = "SingleHorizontal"
+        $dg.RowTemplate.Height = 27
+        $dg.EnableHeadersVisualStyles = $false
+        $dg.ColumnHeadersDefaultCellStyle.BackColor = $clrPanel
+        $dg.ColumnHeadersDefaultCellStyle.ForeColor = $clrTextMuted
+        $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 5)
+        $dg.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.5)
+        $dg.ColumnHeadersHeight = 34
+        $dg.DefaultCellStyle.BackColor = $clrBg
+        $dg.DefaultCellStyle.ForeColor = $clrText
+        $dg.DefaultCellStyle.SelectionBackColor = $clrSel
+        $dg.DefaultCellStyle.SelectionForeColor = $clrText
+        $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#202329")
+        $dg.GridColor = $clrLine
+        $tp.Controls.Add($dg)
+
+        return [PSCustomObject]@{ Tab = $tp; Grid = $dg; Panel = $pnl; SearchBox = $txtSearch; CountLabel = $lblCount; ClearButton = $btnClear; Meta = $null }
+    }
+
+    function New-StartupBtn($parent,$text,$x,$color=$null){
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $text
+        $b.Left = $x; $b.Top = 18; $b.Width = 108; $b.Height = 34
+        $b.FlatStyle = "Flat"
+        $b.FlatAppearance.BorderSize = 1
+        $b.FlatAppearance.BorderColor = $clrLine
+        $b.ForeColor = $clrText
+        if($color){
+            $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml($color)
+            $b.FlatAppearance.MouseOverBackColor=[System.Windows.Forms.ControlPaint]::Light($b.BackColor)
+        } else {
+            $b.BackColor=$clrElev
+            $b.FlatAppearance.MouseOverBackColor=[System.Drawing.ColorTranslator]::FromHtml("#323844")
+        }
+        $parent.Controls.Add($b)
+        return $b
+    }
+
+    function Show-StartupRowDetails {
+        param(
+            [System.Windows.Forms.DataGridView]$Grid,
+            [string]$Title = "Details"
+        )
+        if (-not $Grid -or $Grid.SelectedRows.Count -eq 0) { return }
+        $row = $Grid.SelectedRows[0]
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($col in $Grid.Columns) {
+            $name = $col.Name
+            $val = ""
+            try { $val = "$($row.Cells[$name].Value)" } catch { $val = "" }
+            if ([string]::IsNullOrWhiteSpace($val)) { continue }
+            [void]$lines.Add(("{0}: {1}" -f $name, $val))
+        }
+        if ($lines.Count -eq 0) { return }
+        Show-TextDialog -Title $Title -Text ($lines -join "`r`n")
+    }
+
+    function Set-TabData {
+        param($TabObj, [System.Data.DataTable]$DataTable, [string[]]$SearchColumns)
+        $bs = New-Object System.Windows.Forms.BindingSource
+        $bs.DataSource = $DataTable
+        $TabObj.Grid.DataSource = $bs
+        $TabObj.Meta = [PSCustomObject]@{
+            Table = $DataTable
+            Binding = $bs
+            SearchColumns = $SearchColumns
+        }
+        $TabObj.CountLabel.Text = "$($DataTable.Rows.Count) items"
+    }
+
+    function Update-TabFilter {
+        param($TabObj)
+        if (-not $TabObj -or -not $TabObj.Meta) { return }
+        $meta = $TabObj.Meta
+        $q = $TabObj.SearchBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($q)) {
+            $meta.Binding.RemoveFilter()
+            $TabObj.CountLabel.Text = "$($meta.Table.Rows.Count) items"
+            return
+        }
+        $safe = $q.Replace("'", "''").Replace("[","[[]").Replace("%","[%]").Replace("*","[*]")
+        $clauses = @()
+        foreach ($col in $meta.SearchColumns) {
+            if ($meta.Table.Columns.Contains($col)) {
+                $clauses += "CONVERT([$col], 'System.String') LIKE '%$safe%'"
+            }
+        }
+        if ($clauses.Count -gt 0) {
+            try {
+                $meta.Binding.Filter = ($clauses -join " OR ")
+                $TabObj.CountLabel.Text = "$($meta.Binding.Count) shown / $($meta.Table.Rows.Count) total"
+            } catch {
+                $meta.Binding.RemoveFilter()
+                $TabObj.CountLabel.Text = "$($meta.Table.Rows.Count) items"
+            }
+        }
+    }
+
+    function Get-RegRunEntries([string]$Path, [string]$Scope) {
+        $items = @()
+        if (-not (Test-Path $Path)) { return $items }
+        $disabledPath = Join-Path $Path "WMT_Disabled"
+
+        foreach ($pair in @(
+            @{ KeyPath = $Path; Enabled = $true },
+            @{ KeyPath = $disabledPath; Enabled = $false }
+        )) {
+            if (-not (Test-Path $pair.KeyPath)) { continue }
+            $props = Get-ItemProperty -Path $pair.KeyPath -ErrorAction SilentlyContinue
+            if (-not $props) { continue }
+            foreach ($p in $props.PSObject.Properties) {
+                if ($p.Name -in @("PSPath","PSParentPath","PSChildName","PSDrive","PSProvider")) { continue }
+                $items += [PSCustomObject]@{
+                    Name = $p.Name
+                    Command = "$($p.Value)"
+                    Location = $pair.KeyPath
+                    EntryType = "Registry"
+                    Scope = $Scope
+                    Enabled = $pair.Enabled
+                    ItemPath = $pair.KeyPath
+                    ValueName = $p.Name
+                    RootRunPath = $Path
+                }
+            }
+        }
+        return $items
+    }
+
+    function Get-StartupFolderEntries([string]$Path, [string]$Scope) {
+        $items = @()
+        if (-not (Test-Path $Path)) { return $items }
+        foreach ($file in (Get-ChildItem -Path $Path -File -ErrorAction SilentlyContinue)) {
+            $isDisabled = $file.Extension -eq ".disabled"
+            $items += [PSCustomObject]@{
+                Name = $file.BaseName
+                Command = $file.FullName
+                Location = $Path
+                EntryType = "StartupFolder"
+                Scope = $Scope
+                Enabled = (-not $isDisabled)
+                ItemPath = $file.FullName
+                ValueName = ""
+            }
+        }
+        return $items
+    }
+
+    # Tab 1: Windows Startup
+    $winTab = New-TabPage "Windows"
+    $tabs.TabPages.Add($winTab.Tab)
+
+    $LoadWindowsStartup = {
+        $items = @()
+        $items += Get-RegRunEntries "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" "Current User"
+        $items += Get-RegRunEntries "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "All Users"
+        $items += Get-RegRunEntries "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run" "All Users (32-bit)"
+
+        $items += Get-StartupFolderEntries "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" "Current User"
+        $items += Get-StartupFolderEntries "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup" "All Users"
+
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("Name")
+        $dt.Columns.Add("Enabled")
+        $dt.Columns.Add("Scope")
+        $dt.Columns.Add("Type")
+        $dt.Columns.Add("Command")
+        $dt.Columns.Add("Location")
+        $dt.Columns.Add("ItemPath")
+        $dt.Columns.Add("ValueName")
+        $dt.Columns.Add("RootRunPath")
+        foreach ($i in $items) {
+            $r = $dt.NewRow()
+            $r["Name"] = $i.Name
+            $r["Enabled"] = if ($i.Enabled) { "Yes" } else { "No" }
+            $r["Scope"] = $i.Scope
+            $r["Type"] = $i.EntryType
+            $r["Command"] = $i.Command
+            $r["Location"] = $i.Location
+            $r["ItemPath"] = $i.ItemPath
+            $r["ValueName"] = $i.ValueName
+            $r["RootRunPath"] = $i.RootRunPath
+            $dt.Rows.Add($r)
+        }
+        Set-TabData -TabObj $winTab -DataTable $dt -SearchColumns @("Name","Enabled","Scope","Type","Command","Location")
+        $winTab.Grid.AutoSizeColumnsMode = "Fill"
+        if ($winTab.Grid.Columns["Name"]) { $winTab.Grid.Columns["Name"].FillWeight = 44 }
+        if ($winTab.Grid.Columns["Enabled"]) { $winTab.Grid.Columns["Enabled"].FillWeight = 12 }
+        if ($winTab.Grid.Columns["Scope"]) { $winTab.Grid.Columns["Scope"].FillWeight = 24 }
+        if ($winTab.Grid.Columns["Type"]) { $winTab.Grid.Columns["Type"].FillWeight = 20 }
+        if ($winTab.Grid.Columns["ItemPath"]) { $winTab.Grid.Columns["ItemPath"].Visible = $false }
+        if ($winTab.Grid.Columns["ValueName"]) { $winTab.Grid.Columns["ValueName"].Visible = $false }
+        if ($winTab.Grid.Columns["RootRunPath"]) { $winTab.Grid.Columns["RootRunPath"].Visible = $false }
+        if ($winTab.Grid.Columns["Location"]) { $winTab.Grid.Columns["Location"].Visible = $false }
+        if ($winTab.Grid.Columns["Command"]) { $winTab.Grid.Columns["Command"].Visible = $false }
+    }
+
+    $btnWinRefresh = New-StartupBtn $winTab.Panel "Refresh" 15
+    $btnWinDetails = New-StartupBtn $winTab.Panel "Details" 145
+    $btnWinEnable  = New-StartupBtn $winTab.Panel "Enable" 275 "#1E6F43"
+    $btnWinDisable = New-StartupBtn $winTab.Panel "Disable" 405 "#8A6A00"
+    $btnWinDelete  = New-StartupBtn $winTab.Panel "Delete" 535 "#7B2026"
+    $winTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $winTab })
+    $btnWinDetails.Add_Click({ Show-StartupRowDetails -Grid $winTab.Grid -Title "Windows Startup Details" })
+    $winTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $winTab.Grid -Title "Windows Startup Details" })
+
+    $btnWinEnable.Add_Click({
+        foreach ($row in $winTab.Grid.SelectedRows) {
+            $type = "$($row.Cells["Type"].Value)"
+            $itemPath = "$($row.Cells["ItemPath"].Value)"
+            $valueName = "$($row.Cells["ValueName"].Value)"
+            $rootRunPath = "$($row.Cells["RootRunPath"].Value)"
+            $cmd = "$($row.Cells["Command"].Value)"
+            if ($type -eq "StartupFolder") {
+                if ($itemPath -and $itemPath.EndsWith(".disabled")) {
+                    $newPath = $itemPath.Substring(0, $itemPath.Length - 9)
+                    try { Rename-Item -LiteralPath $itemPath -NewName (Split-Path -Leaf $newPath) -ErrorAction SilentlyContinue } catch {}
+                }
+            } elseif ($type -eq "Registry" -and $itemPath -and $valueName) {
+                if ($itemPath -and $itemPath.EndsWith("\WMT_Disabled")) {
+                    if ($rootRunPath -and -not (Test-Path $rootRunPath)) { New-Item -Path $rootRunPath -Force | Out-Null }
+                    try { Set-ItemProperty -Path $rootRunPath -Name $valueName -Value $cmd -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue } catch {}
+                } else {
+                    try { Set-ItemProperty -Path $itemPath -Name $valueName -Value $cmd -ErrorAction SilentlyContinue } catch {}
+                }
+            }
+        }
+        & $LoadWindowsStartup
+    })
+    $btnWinDisable.Add_Click({
+        foreach ($row in $winTab.Grid.SelectedRows) {
+            $type = "$($row.Cells["Type"].Value)"
+            $itemPath = "$($row.Cells["ItemPath"].Value)"
+            $valueName = "$($row.Cells["ValueName"].Value)"
+            $rootRunPath = "$($row.Cells["RootRunPath"].Value)"
+            $cmd = "$($row.Cells["Command"].Value)"
+            if ($type -eq "StartupFolder") {
+                if ($itemPath -and -not $itemPath.EndsWith(".disabled")) {
+                    $newName = (Split-Path -Leaf $itemPath) + ".disabled"
+                    try { Rename-Item -LiteralPath $itemPath -NewName $newName -ErrorAction SilentlyContinue } catch {}
+                }
+            } elseif ($type -eq "Registry" -and $itemPath -and $valueName) {
+                if ($itemPath -notmatch "\\WMT_Disabled$") {
+                    $disabledPath = Join-Path $rootRunPath "WMT_Disabled"
+                    if (-not (Test-Path $disabledPath)) { New-Item -Path $disabledPath -Force | Out-Null }
+                    try { Set-ItemProperty -Path $disabledPath -Name $valueName -Value $cmd -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue } catch {}
+                }
+            }
+        }
+        & $LoadWindowsStartup
+    })
+    $btnWinDelete.Add_Click({
+        if ($winTab.Grid.SelectedRows.Count -eq 0) { return }
+        if ([System.Windows.Forms.MessageBox]::Show("Delete selected startup entries?","Confirm",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+        foreach ($row in $winTab.Grid.SelectedRows) {
+            $type = "$($row.Cells["Type"].Value)"
+            $itemPath = "$($row.Cells["ItemPath"].Value)"
+            $valueName = "$($row.Cells["ValueName"].Value)"
+            if ($type -eq "StartupFolder") {
+                try { Remove-Item -LiteralPath $itemPath -Force -ErrorAction SilentlyContinue } catch {}
+            } elseif ($type -eq "Registry" -and $itemPath -and $valueName) {
+                try { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+        & $LoadWindowsStartup
+    })
+
+    # Tab 2: Scheduled Tasks
+    $taskTab = New-TabPage "Scheduled Tasks"
+    $tabs.TabPages.Add($taskTab.Tab)
+
+    $LoadScheduledTasks = {
+        $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName, TaskPath, State
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("TaskName")
+        $dt.Columns.Add("Path")
+        $dt.Columns.Add("State")
+        foreach ($t in $tasks) {
+            $r = $dt.NewRow()
+            $r["TaskName"] = $t.TaskName
+            $r["Path"] = $t.TaskPath
+            $r["State"] = "$($t.State)"
+            $dt.Rows.Add($r)
+        }
+        Set-TabData -TabObj $taskTab -DataTable $dt -SearchColumns @("TaskName","Path","State")
+        $taskTab.Grid.AutoSizeColumnsMode = "Fill"
+        if ($taskTab.Grid.Columns["TaskName"]) { $taskTab.Grid.Columns["TaskName"].FillWeight = 70 }
+        if ($taskTab.Grid.Columns["State"]) { $taskTab.Grid.Columns["State"].FillWeight = 30 }
+        if ($taskTab.Grid.Columns["Path"]) { $taskTab.Grid.Columns["Path"].Visible = $false }
+    }
+    $btnTaskRefresh = New-StartupBtn $taskTab.Panel "Refresh" 15
+    $btnTaskDetails = New-StartupBtn $taskTab.Panel "Details" 145
+    $btnTaskEnable  = New-StartupBtn $taskTab.Panel "Enable" 275 "#1E6F43"
+    $btnTaskDisable = New-StartupBtn $taskTab.Panel "Disable" 405 "#8A6A00"
+    $btnTaskDelete  = New-StartupBtn $taskTab.Panel "Delete" 535 "#7B2026"
+    $taskTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $taskTab })
+    $btnTaskDetails.Add_Click({ Show-StartupRowDetails -Grid $taskTab.Grid -Title "Scheduled Task Details" })
+    $taskTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $taskTab.Grid -Title "Scheduled Task Details" })
+
+    $btnTaskEnable.Add_Click({
+        foreach ($row in $taskTab.Grid.SelectedRows) {
+            $name = "$($row.Cells["TaskName"].Value)"
+            $path = "$($row.Cells["Path"].Value)"
+            if ($name) { Enable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue | Out-Null }
+        }
+        & $LoadScheduledTasks
+    })
+    $btnTaskDisable.Add_Click({
+        foreach ($row in $taskTab.Grid.SelectedRows) {
+            $name = "$($row.Cells["TaskName"].Value)"
+            $path = "$($row.Cells["Path"].Value)"
+            if ($name) { Disable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue | Out-Null }
+        }
+        & $LoadScheduledTasks
+    })
+    $btnTaskDelete.Add_Click({
+        if ($taskTab.Grid.SelectedRows.Count -eq 0) { return }
+        if ([System.Windows.Forms.MessageBox]::Show("Delete selected scheduled tasks?","Confirm",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+        foreach ($row in $taskTab.Grid.SelectedRows) {
+            $name = "$($row.Cells["TaskName"].Value)"
+            $path = "$($row.Cells["Path"].Value)"
+            if ($name) { Unregister-ScheduledTask -TaskName $name -TaskPath $path -Confirm:$false -ErrorAction SilentlyContinue }
+        }
+        & $LoadScheduledTasks
+    })
+
+    # Tab 3: Context Menu
+    $ctxTab = New-TabPage "Context Menu"
+    $tabs.TabPages.Add($ctxTab.Tab)
+
+    function Get-ContextMenuEntries {
+        # Use direct Registry API for better performance/stability than provider wildcard scans.
+        $roots = @(
+            @{ Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Path = "Software\Classes\*\shell"; Label = "HKCU *\shell" },
+            @{ Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Path = "Software\Classes\Directory\shell"; Label = "HKCU Directory\shell" },
+            @{ Hive = [Microsoft.Win32.RegistryHive]::LocalMachine; Path = "SOFTWARE\Classes\*\shell"; Label = "HKLM *\shell" },
+            @{ Hive = [Microsoft.Win32.RegistryHive]::LocalMachine; Path = "SOFTWARE\Classes\Directory\shell"; Label = "HKLM Directory\shell" }
+        )
+
+        $items = New-Object System.Collections.Generic.List[Object]
+        $maxItems = 1500
+
+        foreach ($r in $roots) {
+            $base = $null
+            $shellKey = $null
+            try {
+                $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($r.Hive, [Microsoft.Win32.RegistryView]::Default)
+                $shellKey = $base.OpenSubKey($r.Path, $false)
+                if (-not $shellKey) { continue }
+
+                foreach ($subName in $shellKey.GetSubKeyNames()) {
+                    if ($items.Count -ge $maxItems) { break }
+                    $entry = $null
+                    try {
+                        $entry = $shellKey.OpenSubKey($subName, $false)
+                        if (-not $entry) { continue }
+
+                        $display = $subName
+                        try {
+                            $mui = $entry.GetValue("MUIVerb", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                            if ($mui -and -not [string]::IsNullOrWhiteSpace("$mui")) { $display = "$mui" }
+                        } catch {}
+
+                        $enabled = "Yes"
+                        try {
+                            $legacy = $entry.GetValue("LegacyDisable", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                            if ($null -ne $legacy) { $enabled = "No" }
+                        } catch {}
+
+                        [void]$items.Add([PSCustomObject]@{
+                            Name    = $display
+                            KeyName = $subName
+                            Path    = "Registry::HKEY_$($r.Hive.ToString().ToUpper())\$($r.Path)\$subName"
+                            Root    = $r.Label
+                            Enabled = $enabled
+                        })
+                    } catch {}
+                    finally { if ($entry) { $entry.Close() } }
+                }
+            } catch {}
+            finally {
+                if ($shellKey) { $shellKey.Close() }
+                if ($base) { $base.Close() }
+            }
+        }
+
+        return $items | Sort-Object Root, Name -Unique
+    }
+
+    $LoadContextMenu = {
+        $items = Get-ContextMenuEntries
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("Name")
+        $dt.Columns.Add("Enabled")
+        $dt.Columns.Add("Root")
+        $dt.Columns.Add("Path")
+        $dt.Columns.Add("KeyName")
+        foreach ($i in $items) {
+            $r = $dt.NewRow()
+            $r["Name"] = $i.Name
+            $r["Enabled"] = $i.Enabled
+            $r["Root"] = $i.Root
+            $r["Path"] = $i.Path
+            $r["KeyName"] = $i.KeyName
+            $dt.Rows.Add($r)
+        }
+        Set-TabData -TabObj $ctxTab -DataTable $dt -SearchColumns @("Name","Enabled","Root","KeyName")
+        $ctxTab.Grid.AutoSizeColumnsMode = "Fill"
+        if ($ctxTab.Grid.Columns["Name"]) { $ctxTab.Grid.Columns["Name"].FillWeight = 68 }
+        if ($ctxTab.Grid.Columns["Enabled"]) { $ctxTab.Grid.Columns["Enabled"].FillWeight = 12 }
+        if ($ctxTab.Grid.Columns["Root"]) { $ctxTab.Grid.Columns["Root"].FillWeight = 20 }
+        if ($ctxTab.Grid.Columns["Path"]) { $ctxTab.Grid.Columns["Path"].Visible = $false }
+        if ($ctxTab.Grid.Columns["KeyName"]) { $ctxTab.Grid.Columns["KeyName"].Visible = $false }
+    }
+
+    $btnCtxRefresh = New-StartupBtn $ctxTab.Panel "Refresh" 15
+    $btnCtxDetails = New-StartupBtn $ctxTab.Panel "Details" 145
+    $btnCtxEnable  = New-StartupBtn $ctxTab.Panel "Enable" 275 "#1E6F43"
+    $btnCtxDisable = New-StartupBtn $ctxTab.Panel "Disable" 405 "#8A6A00"
+    $btnCtxDelete  = New-StartupBtn $ctxTab.Panel "Delete" 535 "#7B2026"
+    $ctxTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $ctxTab })
+    $btnCtxDetails.Add_Click({ Show-StartupRowDetails -Grid $ctxTab.Grid -Title "Context Menu Details" })
+    $ctxTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $ctxTab.Grid -Title "Context Menu Details" })
+
+    $btnCtxEnable.Add_Click({
+        foreach ($row in $ctxTab.Grid.SelectedRows) {
+            $path = "$($row.Cells["Path"].Value)"
+            if ($path -and (Test-Path -LiteralPath $path)) { Remove-ItemProperty -LiteralPath $path -Name "LegacyDisable" -ErrorAction SilentlyContinue }
+        }
+        & $LoadContextMenu
+    })
+    $btnCtxDisable.Add_Click({
+        foreach ($row in $ctxTab.Grid.SelectedRows) {
+            $path = "$($row.Cells["Path"].Value)"
+            if ($path -and (Test-Path -LiteralPath $path)) { Set-ItemProperty -LiteralPath $path -Name "LegacyDisable" -Value "" -ErrorAction SilentlyContinue }
+        }
+        & $LoadContextMenu
+    })
+    $btnCtxDelete.Add_Click({
+        if ($ctxTab.Grid.SelectedRows.Count -eq 0) { return }
+        if ([System.Windows.Forms.MessageBox]::Show("Delete selected context menu entries?","Confirm",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+        foreach ($row in $ctxTab.Grid.SelectedRows) {
+            $path = "$($row.Cells["Path"].Value)"
+            if ($path -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        & $LoadContextMenu
+    })
+
+    # Tab 4: Services
+    $svcTab = New-TabPage "Services"
+    $tabs.TabPages.Add($svcTab.Tab)
+
+    $LoadServices = {
+        # Use Get-Service to avoid occasional CIM/WMI hangs on some systems.
+        $svcs = Get-Service -ErrorAction SilentlyContinue | Sort-Object DisplayName
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("Name")
+        $dt.Columns.Add("DisplayName")
+        $dt.Columns.Add("StartType")
+        $dt.Columns.Add("State")
+        foreach ($s in $svcs) {
+            $startType = "Unknown"
+            try {
+                $startRaw = (Get-ItemProperty -Path ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $s.Name) -Name Start -ErrorAction SilentlyContinue).Start
+                switch ($startRaw) {
+                    0 { $startType = "Boot" }
+                    1 { $startType = "System" }
+                    2 { $startType = "Automatic" }
+                    3 { $startType = "Manual" }
+                    4 { $startType = "Disabled" }
+                    default { if ($null -ne $startRaw) { $startType = "$startRaw" } }
+                }
+            } catch {}
+            $r = $dt.NewRow()
+            $r["Name"] = $s.Name
+            $r["DisplayName"] = $s.DisplayName
+            $r["StartType"] = $startType
+            $r["State"] = "$($s.Status)"
+            $dt.Rows.Add($r)
+        }
+        Set-TabData -TabObj $svcTab -DataTable $dt -SearchColumns @("Name","DisplayName","StartType","State")
+        $svcTab.Grid.AutoSizeColumnsMode = "Fill"
+        if ($svcTab.Grid.Columns["DisplayName"]) { $svcTab.Grid.Columns["DisplayName"].FillWeight = 56 }
+        if ($svcTab.Grid.Columns["Name"]) { $svcTab.Grid.Columns["Name"].FillWeight = 24 }
+        if ($svcTab.Grid.Columns["StartType"]) { $svcTab.Grid.Columns["StartType"].FillWeight = 10 }
+        if ($svcTab.Grid.Columns["State"]) { $svcTab.Grid.Columns["State"].FillWeight = 10 }
+    }
+
+    $btnSvcRefresh = New-StartupBtn $svcTab.Panel "Refresh" 15
+    $btnSvcDetails = New-StartupBtn $svcTab.Panel "Details" 145
+    $btnSvcEnable  = New-StartupBtn $svcTab.Panel "Enable Auto" 275 "#1E6F43"
+    $btnSvcDisable = New-StartupBtn $svcTab.Panel "Disable" 405 "#8A6A00"
+    $btnSvcDelete  = New-StartupBtn $svcTab.Panel "Delete" 535 "#7B2026"
+    $svcTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $svcTab })
+    $btnSvcDetails.Add_Click({ Show-StartupRowDetails -Grid $svcTab.Grid -Title "Service Details" })
+    $svcTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $svcTab.Grid -Title "Service Details" })
+
+    $btnSvcEnable.Add_Click({
+        foreach ($row in $svcTab.Grid.SelectedRows) {
+            $name = "$($row.Cells["Name"].Value)"
+            if ($name) { Set-Service -Name $name -StartupType Automatic -ErrorAction SilentlyContinue }
+        }
+        & $LoadServices
+    })
+    $btnSvcDisable.Add_Click({
+        foreach ($row in $svcTab.Grid.SelectedRows) {
+            $name = "$($row.Cells["Name"].Value)"
+            if ($name) { Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue }
+        }
+        & $LoadServices
+    })
+    $btnSvcDelete.Add_Click({
+        if ($svcTab.Grid.SelectedRows.Count -eq 0) { return }
+        if ([System.Windows.Forms.MessageBox]::Show("Delete selected services? This is risky.","Confirm",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+        foreach ($row in $svcTab.Grid.SelectedRows) {
+            $name = "$($row.Cells["Name"].Value)"
+            if ($name) { sc.exe delete "$name" | Out-Null }
+        }
+        & $LoadServices
+    })
+
+    $tabLoaded = @{
+        "Windows" = $false
+        "Scheduled Tasks" = $false
+        "Context Menu" = $false
+        "Services" = $false
+    }
+
+    $LoadTabOnDemand = {
+        param([string]$TabName, [bool]$Force = $false)
+        if (-not $Force -and $tabLoaded.ContainsKey($TabName) -and $tabLoaded[$TabName]) { return }
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+        try {
+            switch ($TabName) {
+                "Windows"         { & $LoadWindowsStartup }
+                "Scheduled Tasks" { & $LoadScheduledTasks }
+                "Context Menu"    { & $LoadContextMenu }
+                "Services"        { & $LoadServices }
+            }
+            if ($tabLoaded.ContainsKey($TabName)) { $tabLoaded[$TabName] = $true }
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Failed to load tab '$TabName'.`n$($_.Exception.Message)", "Startup Manager", "OK", "Error") | Out-Null
+        } finally {
+            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        }
+    }
+
+    # Refresh always forces re-load
+    $btnWinRefresh.Add_Click({ & $LoadTabOnDemand "Windows" $true })
+    $btnTaskRefresh.Add_Click({ & $LoadTabOnDemand "Scheduled Tasks" $true })
+    $btnCtxRefresh.Add_Click({ & $LoadTabOnDemand "Context Menu" $true })
+    $btnSvcRefresh.Add_Click({ & $LoadTabOnDemand "Services" $true })
+
+    # Load first tab after form is shown, then lazy-load others when selected.
+    $f.Add_Shown({
+        & $LoadTabOnDemand "Windows" $false
+    })
+    $tabs.Add_SelectedIndexChanged({
+        if ($tabs.SelectedTab -and $tabs.SelectedTab.Text) {
+            & $LoadTabOnDemand $tabs.SelectedTab.Text $false
+        }
+    })
+
+    $f.ShowDialog() | Out-Null
+}
+
 # ==========================================
 # 3. XAML GUI
 # ==========================================
@@ -4813,6 +5843,7 @@ function Show-TaskManager {
                             </StackPanel>
                             <TextBlock Text="WINDOWS REPAIR TOOLS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
+                                <Button Name="btnQuickFix" Content="Quick Fix" Style="{StaticResource WarningBtn}" ToolTip="One guided flow: SFC + DISM + Temp cleanup."/>
                                 <Button Name="btnSFC" Content="SFC Scan" Style="{StaticResource ActionBtn}" ToolTip="System File Checker - repairs corrupted system files"/>
                                 <Button Name="btnDISMCheck" Content="DISM Check" Style="{StaticResource ActionBtn}" ToolTip="Check Windows image health"/>
                                 <Button Name="btnDISMRestore" Content="DISM Restore" Style="{StaticResource UtilityBtn}" ToolTip="Repair Windows image"/>
@@ -5025,6 +6056,9 @@ function Show-TaskManager {
                             <WrapPanel>
                                 <Button Name="btnUtilSysInfo" Content="System Report" Style="{StaticResource ActionBtn}" ToolTip="Generate detailed system report"/>
                                 <Button Name="btnUtilTrim" Content="Trim SSD" Style="{StaticResource ActionBtn}" ToolTip="Optimize SSD performance"/>
+                                <Button Name="btnUtilWinRE" Content="Check WinRE" Style="{StaticResource ActionBtn}" ToolTip="Checks Windows Recovery Environment status via reagentc /info"/>
+                                <Button Name="btnUtilRestoreMgr" Content="Restore Manager" Style="{StaticResource ActionBtn}" ToolTip="List, create, and delete system restore points"/>
+                                <Button Name="btnUtilStartupMgr" Content="Startup Manager" Style="{StaticResource ActionBtn}" ToolTip="Manage startup apps, tasks, context menu entries, and services"/>
                                 <Button Name="btnUtilMas" Content="MAS Activation" Style="{StaticResource UtilityBtn}" ToolTip="Microsoft Activation Scripts"/>
                                 <Button Name="btnTaskManager" Content="Task Scheduler" Style="{StaticResource ActionBtn}" ToolTip="Manage scheduled tasks"/>
                                 <Button Name="btnCtxBuilder" Content="Context Menu" Style="{StaticResource ActionBtn}" ToolTip="Customize right-click menu"/>
@@ -5260,6 +6294,7 @@ Set-ButtonIcon "btnDotNetEnable" "M14.6,16.6L19.2,12L14.6,7.4L16,6L22,12L16,18L1
 Set-ButtonIcon "btnDotNetDisable" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Reset .NET RollFwd" "Removes the DOTNET_ROLL_FORWARD environment variable"
 Set-ButtonIcon "btnTaskManager" "M14,10H2V12H14V10M14,6H2V8H14V6M2,16H10V14H2V16M21.5,11.5L23,13L16,20L11.5,15.5L13,14L16,17L21.5,11.5Z" "Task Scheduler" "View, Enable, Disable, or Delete Windows Scheduled Tasks"
 Set-ButtonIcon "btnInstallGpedit" "M6,2C4.89,2 4,2.89 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2H6M6,4H13V9H18V20H6V4M8,12V14H16V12H8M8,16V18H13V16H8Z" "Install Gpedit" "Installs the Group Policy Editor on Windows Home editions"
+Set-ButtonIcon "btnQuickFix" "M12,2A10,10 0 0,0 2,12H5L8.5,16L12,7L15.5,12H22A10,10 0 0,0 12,2M12,20A8,8 0 0,1 4,12H6L8.5,14.5L12,5.5L15.5,10H20A8,8 0 0,1 12,20Z" "Quick Fix" "Runs SFC + DISM + Temp cleanup"
 Set-ButtonIcon "btnSFC" "M15.5,14L20.5,19L19,20.5L14,15.5V14.71L13.73,14.43C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.43,13.73L14.71,14H15.5M9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14Z" "SFC Scan" "Scans system files for corruption and repairs them"
 Set-ButtonIcon "btnDISMCheck" "M22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10H22M19.5,12.5C19.5,11.1 20.6,10 22,10H8V15H19.5V12.5Z" "DISM Check" "Checks the health of the Windows Image (dism /checkhealth)"
 Set-ButtonIcon "btnDISMRestore" "M19.5,12.5C19.5,11.1 20.6,10 22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10C9.4,10 10.5,11.1 10.5,12.5C10.5,13.9 9.4,15 8,15V19H12V22H8C6.3,22 5,20.7 5,19V15C3.6,15 2.5,13.9 2.5,12.5C2.5,11.1 3.6,10 5,10V9C5,3.5 9.5,-1 15,-1C20.5,-1 25,3.5 25,9V10C26.4,10 27.5,11.1 27.5,12.5C27.5,13.9 26.4,15 25,15V19C25,20.7 23.7,22 22,22H17V19H22V15C20.6,15 19.5,13.9 19.5,12.5Z" "DISM Restore" "Attempts to repair the Windows Image (dism /restorehealth)"
@@ -5313,6 +6348,9 @@ Set-ButtonIcon "btnDrvDisableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,
 Set-ButtonIcon "btnDrvEnableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M11,14V9H9L12,6L15,9H13V14H11Z" "Enable Device Metadata" "Allow device metadata downloads"
 Set-ButtonIcon "btnUtilSysInfo" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "System Info Report" "Generates a full system information report"
 Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim SSD" "Optimizes SSD performance via Trim command"
+Set-ButtonIcon "btnUtilWinRE" "M12,2L3,6V12C3,17.55 6.84,22.74 12,24C17.16,22.74 21,17.55 21,12V6L12,2M11,7H13V14H11V7M11,16H13V18H11V16Z" "Check WinRE" "Check Windows Recovery Environment status"
+Set-ButtonIcon "btnUtilRestoreMgr" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M11,7V12.59L15.3,16.9L16.7,15.5L13,11.8V7H11Z" "Restore Manager" "Manage System Restore points"
+Set-ButtonIcon "btnUtilStartupMgr" "M4,18H10V6H4V18M11,18H17V2H11V18M18,18H24V10H18V18Z" "Startup Manager" "Manage startup entries, tasks, context menus, and services"
 Set-ButtonIcon "btnUtilMas" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "MAS Activation" "Downloads and runs Microsoft Activation Scripts"
 Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Context Menu Builder" "Create a custom right-click action for Windows 11"
 # ==========================================
@@ -5348,6 +6386,7 @@ $btnSFC = Get-Ctrl "btnSFC"
 $btnDISMCheck = Get-Ctrl "btnDISMCheck"
 $btnDISMRestore = Get-Ctrl "btnDISMRestore"
 $btnCHKDSK = Get-Ctrl "btnCHKDSK"
+$btnQuickFix = Get-Ctrl "btnQuickFix"
 
 $btnPerfServicesManual = Get-Ctrl "btnPerfServicesManual"
 $btnPerfServicesRevert = Get-Ctrl "btnPerfServicesRevert"
@@ -5435,6 +6474,9 @@ $btnCleanXbox = Get-Ctrl "btnCleanXbox"
 
 $btnUtilSysInfo = Get-Ctrl "btnUtilSysInfo"
 $btnUtilTrim = Get-Ctrl "btnUtilTrim"
+$btnUtilWinRE = Get-Ctrl "btnUtilWinRE"
+$btnUtilRestoreMgr = Get-Ctrl "btnUtilRestoreMgr"
+$btnUtilStartupMgr = Get-Ctrl "btnUtilStartupMgr"
 $btnUtilMas = Get-Ctrl "btnUtilMas"
 $btnUpdateRepair = Get-Ctrl "btnUpdateRepair"
 $btnUpdateServices = Get-Ctrl "btnUpdateServices"
@@ -5555,6 +6597,7 @@ Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "b
 Add-SearchIndexEntry "btnWingetFind"        "Search Winget Packages"          "btnTabUpdates"
 
 # 2. System Health
+Add-SearchIndexEntry "btnQuickFix"           "Quick Fix (SFC + DISM + Cleanup)" "btnTabHealth"
 Add-SearchIndexEntry "btnSFC"               "SFC Scan (System File Checker)"  "btnTabHealth"
 Add-SearchIndexEntry "btnDISMCheck"         "DISM Check Health"               "btnTabHealth"
 Add-SearchIndexEntry "btnDISMRestore"       "DISM Restore Health"             "btnTabHealth"
@@ -5613,6 +6656,9 @@ Add-SearchIndexEntry "btnCleanXbox"         "Clean Xbox Credentials"          "b
 # 7. Utilities
 Add-SearchIndexEntry "btnUtilSysInfo"       "System Info Report"              "btnTabUtils"
 Add-SearchIndexEntry "btnUtilTrim"          "Trim SSD (Optimize)"             "btnTabUtils"
+Add-SearchIndexEntry "btnUtilWinRE"         "Check WinRE Status"              "btnTabUtils"
+Add-SearchIndexEntry "btnUtilRestoreMgr"    "System Restore Manager"          "btnTabUtils"
+Add-SearchIndexEntry "btnUtilStartupMgr"    "Startup Manager (4 Tabs)"        "btnTabUtils"
 Add-SearchIndexEntry "btnUtilMas"           "MAS Activation"                  "btnTabUtils"
 Add-SearchIndexEntry "btnUpdateRepair"      "Reset Windows Update Components" "btnTabUtils"
 Add-SearchIndexEntry "btnUpdateServices"    "Restart Update Services"         "btnTabUtils"
@@ -6047,13 +7093,25 @@ $Script:StartWingetAction = {
                 Write-Output "LOG:[$act] Command: $userCmd"
 
                 # 1. RUN COMMAND (First Attempt - Admin)
+                # UX: all package updates run one-by-one in visible windows (auto-close when done),
+                # so end-users can follow each update without relying on Activity Log only.
                 $isPipUpdate = (($src -eq "pip" -or $src -eq "pip3") -and $act -eq "Update")
                 $isChocoUpdate = (($src -eq "chocolatey" -or $src -eq "choco") -and $act -eq "Update")
                 $isPythonUpdate = ($act -eq "Update" -and (([string]$id -match "(?i)\bpython([0-9\.]*)\b") -or ([string]$name -match "(?i)\bpython([0-9\.]*)\b")))
-                $useVisibleWindow = ($isPipUpdate -or $isChocoUpdate -or $isPythonUpdate)
+                $useVisibleWindow = ($act -eq "Update")
 
                 if ($useVisibleWindow) {
-                    $windowTag = "Package"
+                    $windowTag = switch -Regex ($src) {
+                        "^(winget)$"      { "Winget"; break }
+                        "^(msstore)$"     { "MSStore"; break }
+                        "^(pip|pip3)$"    { "PIP"; break }
+                        "^(npm)$"         { "NPM"; break }
+                        "^(chocolatey|choco)$" { "Chocolatey"; break }
+                        "^(scoop)$"       { "Scoop"; break }
+                        "^(gem|ruby)$"    { "RubyGem"; break }
+                        "^(cargo|rust)$"  { "Cargo"; break }
+                        default           { "Package" }
+                    }
                     if ($isPipUpdate) { $windowTag = "PIP" }
                     elseif ($isChocoUpdate) { $windowTag = "Chocolatey" }
                     elseif ($isPythonUpdate) { $windowTag = "Python" }
@@ -6077,7 +7135,12 @@ $Script:StartWingetAction = {
                     if ($fixP.ExitCode -eq 0) {
                         Write-Output "LOG:[$act][$index/$total] Sources reset. Retrying $name..."
                         if ($wingetArgs -and ($src -eq "winget" -or $src -eq "msstore")) {
-                            $p = Invoke-WingetLive $wingetArgs
+                            if ($useVisibleWindow) {
+                                $retryCmd = "winget $wingetArgs"
+                                $p = Invoke-VisibleCmd $retryCmd "WMT Winget Retry - $name"
+                            } else {
+                                $p = Invoke-WingetLive $wingetArgs
+                            }
                         } else {
                             $p = Invoke-WingetCmd $cmd
                         }
@@ -6542,6 +7605,32 @@ $btnWingetScan.Add_Click({
                 return $false
             }
 
+            function ConvertFrom-WingetListLine {
+                param([string]$Line)
+                if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
+                # Winget table output is column-separated by 2+ spaces; this is more stable than fixed offsets.
+                $parts = @($Line -split "\s{2,}" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($parts.Count -ge 5) {
+                    return [PSCustomObject]@{
+                        Name = $parts[0].Trim()
+                        Id = $parts[1].Trim()
+                        Version = $parts[2].Trim()
+                        Available = $parts[3].Trim()
+                        Source = $parts[4].Trim()
+                    }
+                }
+                if ($parts.Count -eq 4) {
+                    return [PSCustomObject]@{
+                        Name = $parts[0].Trim()
+                        Id = $parts[1].Trim()
+                        Version = $parts[2].Trim()
+                        Available = $parts[3].Trim()
+                        Source = ""
+                    }
+                }
+                return $null
+            }
+
             Write-Output "LOG:Scanning $SourceName..."
 
             # Keep sources isolated so msstore cannot block winget results.
@@ -6582,8 +7671,15 @@ $btnWingetScan.Add_Click({
                         if ($line -match "explicit targeting" -or $line -match "following packages have an upgrade available") { continue }
 
                         $n = $null; $i = $null; $v = $null; $a = $null
+                        $parsed = ConvertFrom-WingetListLine -Line $line
+                        if ($parsed) {
+                            $n = $parsed.Name
+                            $i = $parsed.Id
+                            $v = $parsed.Version
+                            $a = $parsed.Available
+                        }
 
-                        if ($idxId -gt 0 -and $line.Length -gt $idxId) {
+                        if (-not $n -and $idxId -gt 0 -and $line.Length -gt $idxId) {
                             $n = $line.Substring(0, $idxId).Trim()
                             $rest = $line.Substring($idxId).Trim()
                             $parts = $rest -split "\s+"
@@ -7241,6 +8337,7 @@ $btnWingetUninstall.Add_Click({
 })
 
 # --- System Health ---
+$btnQuickFix.Add_Click({ Invoke-QuickFixSuite })
 $btnSFC.Add_Click({
     Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "sfc /scannow; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
 })
@@ -7640,6 +8737,9 @@ $btnUtilTrim.Add_Click({
     Start-SSDTrimConsole
 })
 $btnUtilSysInfo.Add_Click({ Invoke-SystemReports })
+$btnUtilWinRE.Add_Click({ Invoke-WinREStatusCheck })
+$btnUtilRestoreMgr.Add_Click({ Show-SystemRestoreManager })
+$btnUtilStartupMgr.Add_Click({ Show-StartupManager })
 $btnUtilMas.Add_Click({ Invoke-MASActivation })
 $btnUpdateRepair.Add_Click({ Invoke-WindowsUpdateRepairFull })
 $btnCtxBuilder.Add_Click({ Show-ContextMenuBuilder })
