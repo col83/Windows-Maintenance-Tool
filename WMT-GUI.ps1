@@ -11,8 +11,10 @@
 # ==========================================
 $AppVersion = "5.3"
 $ErrorActionPreference = "SilentlyContinue"
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+# Set encoding dynamically based on the user's local Windows language
+$OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+[Console]::OutputEncoding = $OEMEncoding
+$OutputEncoding = $OEMEncoding
 
 # HIDE CONSOLE (Safe Check)
 # This prevents crashes if you run the script twice in the same session
