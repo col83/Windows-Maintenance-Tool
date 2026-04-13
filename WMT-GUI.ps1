@@ -7607,32 +7607,6 @@ $btnWingetScan.Add_Click({
                 return $false
             }
 
-            function ConvertFrom-WingetListLine {
-                param([string]$Line)
-                if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
-                # Winget table output is column-separated by 2+ spaces; this is more stable than fixed offsets.
-                $parts = @($Line -split "\s{2,}" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-                if ($parts.Count -ge 5) {
-                    return [PSCustomObject]@{
-                        Name = $parts[0].Trim()
-                        Id = $parts[1].Trim()
-                        Version = $parts[2].Trim()
-                        Available = $parts[3].Trim()
-                        Source = $parts[4].Trim()
-                    }
-                }
-                if ($parts.Count -eq 4) {
-                    return [PSCustomObject]@{
-                        Name = $parts[0].Trim()
-                        Id = $parts[1].Trim()
-                        Version = $parts[2].Trim()
-                        Available = $parts[3].Trim()
-                        Source = ""
-                    }
-                }
-                return $null
-            }
-
             Write-Output "LOG:Scanning $SourceName..."
 
             # Keep sources isolated so msstore cannot block winget results.
@@ -7664,37 +7638,43 @@ $btnWingetScan.Add_Click({
 
                 if (-not [string]::IsNullOrWhiteSpace($out)) {
                     $lines = $out -split "`r`n"
-                    $idxId = -1
-                    foreach ($l in $lines) { if ($l -match "Name\s+Id\s+Version") { $idxId = $l.IndexOf("Id"); break } }
 
                     foreach ($line in $lines) {
                         $line = $line.Trim()
-                        if (!$line -or $line -match "^-+" -or $line -match "^Name\s+Id") { continue }
+                        
+                        # Skip dividers and empty lines
+                        if (!$line -or $line -match "^-+") { continue }
                         if ($line -match "explicit targeting" -or $line -match "following packages have an upgrade available") { continue }
 
-                        $n = $null; $i = $null; $v = $null; $a = $null
-                        $parsed = ConvertFrom-WingetListLine -Line $line
-                        if ($parsed) {
-                            $n = $parsed.Name
-                            $i = $parsed.Id
-                            $v = $parsed.Version
-                            $a = $parsed.Available
-                        }
+                        # Split the line into solid words/chunks
+                        $parts = $line -split '\s+'
+                        $len = $parts.Count
+                        
+                        # We need at least 4 chunks: Name, Id, Version, Available
+                        if ($len -ge 4) {
+                            $lastWord = $parts[-1]
+                            
+                            # Check if the Source column exists (winget/msstore). If yes, grab 5 chunks back.
+                            if ($len -ge 5 -and ($lastWord -eq "winget" -or $lastWord -eq "msstore")) {
+                                $a = $parts[-2]
+                                $v = $parts[-3]
+                                $i = $parts[-4]
+                                $n = ($parts[0..($len-5)] -join " ")
+                            } else {
+                                # Source column is hidden! Grab 4 chunks back.
+                                $a = $parts[-1]
+                                $v = $parts[-2]
+                                $i = $parts[-3]
+                                $n = ($parts[0..($len-4)] -join " ")
+                            }
 
-                        if (-not $n -and $idxId -gt 0 -and $line.Length -gt $idxId) {
-                            $n = $line.Substring(0, $idxId).Trim()
-                            $rest = $line.Substring($idxId).Trim()
-                            $parts = $rest -split "\s+"
-                            if ($parts.Count -ge 4) { $i = $parts[0]; $v = $parts[1]; $a = $parts[2] }
-                            elseif ($parts.Count -ge 3) { $i = $parts[0]; $v = $parts[1]; $a = $parts[2] }
-                        }
-                        if (!$n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)') {
-                            $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim(); $a = $matches[4].Trim()
-                        }
-                        if ($n -and $i -and $i.Length -gt 2) {
-                            if (Test-Ignored $n $i) { continue }
-                            if ($v -eq "Unknown") { $v = "?" }
-                            [PSCustomObject]@{ Source = $SourceName; Name = $n; Id = $i; Version = $v; Available = $a }
+                            # Ensure we have valid data and skip the localized Header row ("Id")
+                            if ($n -and $i -and $i.Length -gt 2 -and $i -notmatch "^Id$") {
+                                if (Test-Ignored $n $i) { continue }
+                                if ($v -eq "Unknown") { $v = "?" }
+                                
+                                [PSCustomObject]@{ Source = $SourceName; Name = $n; Id = $i; Version = $v; Available = $a }
+                            }
                         }
                     }
                 }
@@ -8197,43 +8177,53 @@ $btnWingetFind.Add_Click({
                 $out = $p.StandardOutput.ReadToEnd()
                 $p.WaitForExit()
                 
-                $lines = $out -split "`r`n"
-                $idxId = -1
-                foreach ($line in $lines) { if ($line -match "Name\s+Id\s+Version") { $idxId = $line.IndexOf("Id"); break } }
-
-                foreach ($line in $lines) {
-                    $line = $line.Trim()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    if ($line -match "^-+$" -or $line -match "^Name\s+Id" -or $line -match "^-{3,}") { continue } 
-                    if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:" -or $line -match "No package found") { continue }
+                if (-not [string]::IsNullOrWhiteSpace($out)) {
+                    $lines = $out -split "`r`n"
                     
-                    if ($line -match "^Name" -and $line -match "Id" -and $line -match "Version") { continue }
-                    if ($line -eq "-") { continue }
+                    foreach ($line in $lines) {
+                        $line = $line.Trim()
+                        
+                        # Skip dividers, headers, and empty lines
+                        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                        if ($line -match "^-+$" -or $line -match "^Name\s+Id" -or $line -match "^-{3,}") { continue } 
+                        if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:" -or $line -match "No package found") { continue }
+                        if ($line -eq "-") { continue }
 
-                    $n=$null; $i=$null; $v=$null; $s="winget"
-                    
-                    # Method A: Header Offset
-                    if ($idxId -gt 0 -and $line.Length -gt $idxId) {
-                        $n = $line.Substring(0, $idxId).Trim()
-                        $rest = $line.Substring($idxId).Trim()
-                        $parts = $rest -split "\s+"
-                        if ($parts.Count -ge 3) { $i = $parts[0]; $v = $parts[1]; $s = $parts[2] }
-                        elseif ($parts.Count -ge 2) { $i = $parts[0]; $v = $parts[1] }
-                    }
-                    
-                    # Method B: Regex Fallback
-                    if (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)') {
-                        $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim(); $s = $matches[4].Trim()
-                    }
-                    elseif (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)') {
-                        $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim()
-                    }
+                        # Split by 2 OR MORE spaces (\s{2,}). 
+                        # This perfectly separates columns without breaking names that have 1 space!
+                        $parts = $line -split '\s{2,}'
+                        $len = $parts.Count
+                        
+                        $n = $null; $i = $null; $v = $null; $s = "winget"
 
-                    if ($n -and $i -and $i.Length -gt 2) {
-                        if ($n -eq "Name" -and $i -eq "Id") { continue }
-                        if ($i -eq "Version" -or $v -eq "Source") { continue }
-                        if ($i -notmatch "Tag:" -and $i -notmatch "Moniker:" -and $i -notmatch "input") {
+                        if ($len -ge 5) {
+                            # Layout: Name | Id | Version | Match | Source
+                            $n = $parts[0].Trim()
+                            $i = $parts[1].Trim()
+                            $v = $parts[2].Trim()
+                            $s = $parts[4].Trim()
+                        } elseif ($len -eq 4) {
+                            # Layout: Name | Id | Version | Source (Match column is empty)
+                            $n = $parts[0].Trim()
+                            $i = $parts[1].Trim()
+                            $v = $parts[2].Trim()
+                            $s = $parts[3].Trim()
+                        } elseif ($len -eq 3) {
+                            # Layout: Name | Id | Version (Source is hidden)
+                            $n = $parts[0].Trim()
+                            $i = $parts[1].Trim()
+                            $v = $parts[2].Trim()
+                        }
+
+                        if ($n -and $i -and $i.Length -gt 2) {
+                            # Final header checks just in case
+                            if ($n -eq "Name" -and $i -eq "Id") { continue }
+                            if ($i -eq "Version" -or $v -eq "Source") { continue }
+                            
                             if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
+                            if ($v -eq "Unknown") { $v = "?" }
+                            
+                            # Available is hardcoded to "-" since searches don't show updates
                             [PSCustomObject]@{ Source=$s; Name=$n; Id=$i; Version=$v; Available="-" }
                         }
                     }
