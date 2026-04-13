@@ -27,15 +27,19 @@ if "%ERRORLEVEL%"=="43" (
   exit /b
 )
 
-:: 2. Check for updates to the GUI Script (.ps1)
+:: 2. Check for updates to the GUI Script (.ps1) by comparing $AppVersion
 echo Checking for WMT-GUI.ps1 updates...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri '%SCRIPT_URL%' -OutFile '%SCRIPT%' -UseBasicParsing; exit 0 } catch { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$f='%SCRIPT%'; $u='%SCRIPT_URL%'; $lv=[version]'0.0'; " ^
+  "if (Test-Path $f) { $lt=Get-Content $f -Raw -ErrorAction Ignore; if ($lt -match '\$AppVersion\s*=\s*.([\d\.]+)') { $lv=[version]$matches[1] } }; " ^
+  "$rt=try { (Invoke-WebRequest -Uri $u -UseBasicParsing).Content } catch { $null }; " ^
+  "if ($rt -match '\$AppVersion\s*=\s*.([\d\.]+)') { $rv=[version]$matches[1]; if ($rv -gt $lv) { [IO.File]::WriteAllText($f, $rt); exit 45 } }; " ^
+  "if (Test-Path $f) { exit 0 } else { exit 1 }"
 
-if not "%ERRORLEVEL%"=="0" (
-  echo [WARNING] Failed to download the latest WMT-GUI.ps1. Using local copy...
-)
-
-if not exist "%SCRIPT%" (
+set "PS_EXIT=%ERRORLEVEL%"
+if "%PS_EXIT%"=="45" (
+  echo [INFO] WMT-GUI.ps1 was updated to the latest version.
+) else if "%PS_EXIT%"=="1" (
   powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Add-Type -AssemblyName PresentationFramework; $msg='WMT-GUI.ps1 was not found and the download failed.' + [Environment]::NewLine + 'Please check your internet connection.'; [System.Windows.MessageBox]::Show($msg,'WMT Launcher Error',[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null"
   exit /b 1
