@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v5.1-green)
+![Version](https://img.shields.io/badge/version-v5.2-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -9,7 +9,7 @@ All-in-one Windows maintenance and optimization toolkit. Features system repair,
 ---
 
 ## 📸 Screenshots
-<img width="1918" height="1007" alt="image" src="https://github.com/user-attachments/assets/941fee01-31ed-471d-a2ce-1ec94ab349e0" />
+<img width="1054" height="1025" alt="image" src="https://github.com/user-attachments/assets/2d7f7418-4d43-43bf-b294-d46935082a9e" />
 
 ---
 
@@ -38,6 +38,7 @@ All-in-one Windows maintenance and optimization toolkit. Features system repair,
 - **DISM:** Check and Restore Windows image health
 - **CHKDSK:** Scan all drives for filesystem errors
 - **Windows Update Repair:** Reset components, clear cache, restart services
+- **Quick Fix:** Runs simple commands to do a Quick Fix
 
 ### 🌐 Network & DNS
 - **Network Tools:** Flush DNS, reset Wi-Fi, full network repair
