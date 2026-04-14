@@ -4244,14 +4244,12 @@ function Show-TaskManager {
 function Invoke-WinREStatusCheck {
     Invoke-UiCommand {
         # 1. FIX THE ENCODING
-        # Temporarily force PowerShell to read this specific native command in OEM
         $oldEnc = [Console]::OutputEncoding
         [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
         
         $raw = & reagentc.exe /info 2>&1
         $exitCode = $LASTEXITCODE
         
-        # Restore original encoding immediately after
         [Console]::OutputEncoding = $oldEnc
 
         $text = ($raw | Out-String).Trim()
@@ -4262,22 +4260,33 @@ function Invoke-WinREStatusCheck {
         $status = "Unknown"
         $location = "Unknown"
         
-        # 2. FIX THE REGEX (Bilingual Support)
-        # Matches English "Windows RE status:" OR French "État de l'environnement..."
-        if ($text -match '(?im)^\s*(?:Windows RE status|.tat[^:]+):\s(.+)$') {
-            $status = $matches[1].Trim()
-        }
-        if ($text -match '(?im)^\s*(?:Windows RE location|Emplacement[^:]+):\s*(.+)$') {
-            $location = $matches[1].Trim()
+        # 2. UNIVERSAL EXTRACTION (Indentation-based)
+        # We only grab lines that are INDENTED with spaces and contain a colon.
+        # This perfectly ignores unindented header lines that might have colons!
+        $colonLines = $text -split "`r`n" | Where-Object { $_ -match '^\s+[^:]+:' }
+        
+        if ($colonLines.Count -ge 2) {
+            # The 1st indented line is ALWAYS the Status
+            $status = ($colonLines[0] -split ":", 2)[1].Trim()
+            # The 2nd indented line is ALWAYS the Location
+            $location = ($colonLines[1] -split ":", 2)[1].Trim()
         }
 
         $warnings = New-Object System.Collections.Generic.List[string]
         if ($exitCode -ne 0) { [void]$warnings.Add("reagentc returned exit code: $exitCode") }
         
-        # 3. FIX THE HEALTH CHECK (Bilingual Support)
-        # Check for English "Enabled" or French "Activé"
-        if ($status -notmatch '(?i)^(enabled|activé|activ\w+)$') { [void]$warnings.Add("Windows RE is not enabled.") }
-        if ($location -match '(?i)unknown|inconnu|not set|n/a') { [void]$warnings.Add("Recovery location is not configured correctly.") }
+        # 3. UNIVERSAL HEALTH CHECK & AUTO-CORRECT
+        if ([string]::IsNullOrWhiteSpace($location) -or $location.Length -lt 5) { 
+            [void]$warnings.Add("Windows RE is not enabled or recovery location is missing.") 
+            
+            if ([string]::IsNullOrWhiteSpace($status) -or $status -eq "Unknown") {
+                $status = "Disabled (Inferred)"
+            }
+        } else {
+            if ([string]::IsNullOrWhiteSpace($status) -or $status -eq "Unknown") {
+                $status = "Enabled (Inferred)"
+            }
+        }
 
         $health = if ($warnings.Count -eq 0) { "OK" } else { "Needs Attention" }
         $headline = if ($warnings.Count -eq 0) { "WinRE looks healthy." } else { "WinRE needs attention." }
