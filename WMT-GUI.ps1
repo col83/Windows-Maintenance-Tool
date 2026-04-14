@@ -4264,7 +4264,7 @@ function Invoke-WinREStatusCheck {
         
         # 2. FIX THE REGEX (Bilingual Support)
         # Matches English "Windows RE status:" OR French "État de l'environnement..."
-        if ($text -match '(?im)^\s*(?:Windows RE status|.*tat de[^:]+):\s*(.+)$') {
+        if ($text -match '(?im)^\s*(?:Windows RE status|.tat[^:]+):\s(.+)$') {
             $status = $matches[1].Trim()
         }
         if ($text -match '(?im)^\s*(?:Windows RE location|Emplacement[^:]+):\s*(.+)$') {
