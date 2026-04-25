@@ -2287,7 +2287,7 @@ function Invoke-RegistryTask {
                 function Test-IsWhitelisted {
                     param($Path)
                     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-                    $SafeList = @("TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection", "psmachine", "WebView2", "System.Data.dll", "System.EnterpriseServices", "rundll32", "explorer.exe", "svchost", "dllhost", "wmiprvse", "mmgaserver", "pickerhost", "castsrv", "uihelper", "backgroundtaskhost", "smartscreen", "runtimebroker", "mousocoreworker", "spatialaudiolicensesrv", "speechruntime", "mstsc.exe", "searchprotocolhost", "AppX", "WindowsApps", "UIEOrchestrator", "control.exe", "sdclt.exe", "provtool.exe", "perfmon", "Diagnostic.Perfmon")
+                    $SafeList = @("TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection", "psmachine", "WebView2", "System.Data.dll", "System.EnterpriseServices", "rundll32", "explorer.exe", "svchost", "dllhost", "wmiprvse", "mmgaserver", "pickerhost", "castsrv", "uihelper", "backgroundtaskhost", "smartscreen", "runtimebroker", "mousocoreworker", "spatialaudiolicensesrv", "speechruntime", "mstsc.exe", "searchprotocolhost", "AppX", "WindowsApps", "UIEOrchestrator", "control.exe", "sdclt.exe", "provtool.exe", "perfmon", "Diagnostic.Perfmon", "QuickActionsPS", "VailAudioProxy")
                     foreach ($safe in $SafeList) { if ($Path -match "(?i)$safe") { return $true } }
                     return $false
                 }
@@ -9940,9 +9940,9 @@ $window.Add_Loaded({
             $window.WindowState = [System.Windows.WindowState]::Maximized
         }
 
-        # 1. Click the Updates tab by default
-        (Get-Ctrl "btnTabUpdates").RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-    
+        # 1. Click the Updates tab by default (This is the fixed line)
+        (Get-Ctrl "btnTabUpdates").RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+
         # 2. Trigger the background update check
         Start-UpdateCheckBackground
         # 3. Update tweak button states based on system
