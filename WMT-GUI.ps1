@@ -6148,6 +6148,7 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="100"/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -6160,6 +6161,7 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceGPU" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <Button Name="btnMyDeviceGPUDriver" Content="Check Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="120"/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -6184,6 +6186,7 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <Button Name="btnMyDeviceTrim" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="120"/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -6768,6 +6771,59 @@ $btnCtxBuilder = Get-Ctrl "btnCtxBuilder"
 $pnlUpdates = Get-Ctrl "pnlUpdates"
 $pnlCatalog = Get-Ctrl "pnlCatalog"
 $pnlMyDevice = Get-Ctrl "pnlMyDevice"
+$btnMyDeviceCleanRAM = Get-Ctrl "btnMyDeviceCleanRAM"
+if ($btnMyDeviceCleanRAM) {
+    $btnMyDeviceCleanRAM.Add_Click({
+            Invoke-UiCommand {
+                if (-not ([System.Management.Automation.PSTypeName]'Win32Functions.Win32EmptyWorkingSet').Type) {
+                    $code = '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc);'
+                    Add-Type -MemberDefinition $code -Name "Win32EmptyWorkingSet" -Namespace Win32Functions
+                }
+                $processes = Get-Process
+                $count = 0
+                foreach ($p in $processes) {
+                    try {
+                        [Win32Functions.Win32EmptyWorkingSet]::EmptyWorkingSet($p.Handle) | Out-Null
+                        $count++
+                    }
+                    catch {}
+                }
+                [GC]::Collect()
+                Write-GuiLog "Cleaned working sets for $count processes and freed RAM."
+            } "Cleaning RAM..."
+        })
+}
+
+$btnMyDeviceTrim = Get-Ctrl "btnMyDeviceTrim"
+if ($btnMyDeviceTrim) {
+    $btnMyDeviceTrim.Add_Click({ Start-SSDTrimConsole })
+}
+
+$btnMyDeviceGPUDriver = Get-Ctrl "btnMyDeviceGPUDriver"
+if ($btnMyDeviceGPUDriver) {
+    $btnMyDeviceGPUDriver.Add_Click({
+            # Get all GPUs and extract their names as a single string array
+            $gpus = Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name
+
+            # Determine unique vendors present in the system
+            $vendors = @()
+            if ($gpus -match "(?i)NVIDIA") { $vendors += "NVIDIA" }
+            if ($gpus -match "(?i)AMD|Radeon") { $vendors += "AMD" }
+            if ($gpus -match "(?i)Intel") { $vendors += "Intel" }
+
+            # Open the respective download pages
+            if ($vendors.Count -eq 0) {
+                Start-Process "https://www.google.com/search?q=Graphics+driver+download"
+            }
+            else {
+                foreach ($vendor in $vendors) {
+                    if ($vendor -eq "NVIDIA") { Start-Process "https://www.nvidia.com/Download/index.aspx" }
+                    if ($vendor -eq "AMD") { Start-Process "https://www.amd.com/en/support" }
+                    if ($vendor -eq "Intel") { Start-Process "https://www.intel.com/content/www/us/en/download-center/home.html" }
+                }
+            }
+        })
+}
 $lstCatalog = Get-Ctrl "lstCatalog"
 $txtCatalogSearch = Get-Ctrl "txtCatalogSearch"
 $btnShowCatalog = Get-Ctrl "btnShowCatalog"
