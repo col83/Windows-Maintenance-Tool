@@ -6430,6 +6430,23 @@ function Set-Hags {
                             </WrapPanel>
                         </StackPanel>
                     </Border>
+                    
+                    <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <Viewbox Width="24" Height="24">
+                                    <Canvas Width="24" Height="24">
+                                        <Path Fill="#0078D7" Data="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/>
+                                    </Canvas>
+                                </Viewbox>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="OneDrive" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                <TextBlock Text="Set all OneDrive files to 'Online Only' to immediately free up local disk space." FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                <Button Name="btnCleanupOneDrive" Content="Free Up Space" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="130"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </StackPanel>
 
                 <!-- UTILITIES PANEL -->
@@ -6859,6 +6876,7 @@ $btnCleanTemp = Get-Ctrl "btnCleanTemp"
 $btnCleanShortcuts = Get-Ctrl "btnCleanShortcuts"
 $btnCleanReg = Get-Ctrl "btnCleanReg"
 $btnCleanXbox = Get-Ctrl "btnCleanXbox"
+$btnCleanupOneDrive = Get-Ctrl "btnCleanupOneDrive"
 
 $btnUtilSysInfo = Get-Ctrl "btnUtilSysInfo"
 $btnUtilTrim = Get-Ctrl "btnUtilTrim"
@@ -7102,6 +7120,7 @@ Add-SearchIndexEntry "btnCleanTemp"         "Clean Temporary Files"           "b
 Add-SearchIndexEntry "btnCleanShortcuts"    "Fix Broken Shortcuts"            "btnTabCleanup"
 Add-SearchIndexEntry "btnCleanReg"          "Registry Cleanup & Backup"       "btnTabCleanup"
 Add-SearchIndexEntry "btnCleanXbox"         "Clean Xbox Credentials"          "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanupOneDrive" "Free up OneDrive space (Online Only)" "btnTabCleanup"
 
 # 7. Utilities
 Add-SearchIndexEntry "btnUtilSysInfo"       "System Info Report"              "btnTabUtils"
@@ -9202,6 +9221,30 @@ $btnCleanReg.Add_Click({
         $form.ShowDialog() | Out-Null
         if ($form.Tag) { Invoke-RegistryTask -Action $form.Tag }
     })
+$# --- OneDrive Cleanup ---
+$btnCleanupOneDrive = Get-Ctrl "btnCleanupOneDrive"
+if ($btnCleanupOneDrive) {
+    # Check if OneDrive is actually present on the system before enabling the button
+    if (-not (Test-Path $env:OneDrive -ErrorAction SilentlyContinue)) {
+        $btnCleanupOneDrive.IsEnabled = $false
+        $btnCleanupOneDrive.Content = "Not Installed"
+        $btnCleanupOneDrive.ToolTip = "OneDrive is not installed or disabled on this system."
+    }
+
+    $btnCleanupOneDrive.Add_Click({
+            Invoke-UiCommand {
+                if (Test-Path $env:OneDrive) {
+                    Write-GuiLog "Freeing up OneDrive space..."
+                    # +U means Unpinned (Online Only), -P removes the Always Keep on this device flag
+                    Start-Process -FilePath "attrib.exe" -ArgumentList "+U -P /s /d `"$env:OneDrive\*.*`"" -Wait -WindowStyle Hidden
+                    Write-GuiLog "OneDrive files have been set to Online Only."
+                }
+                else {
+                    Write-GuiLog "OneDrive folder not found on this system."
+                }
+            } "Freeing OneDrive Space..."
+        })
+}
 $btnCleanXbox.Add_Click({
         if ([System.Windows.MessageBox]::Show("Delete stored Xbox credentials? This signs you out of Xbox services.", "Xbox Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning) -eq "Yes") { Start-XboxClean }
     })
