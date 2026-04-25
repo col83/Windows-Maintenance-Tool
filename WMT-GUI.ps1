@@ -145,11 +145,11 @@ function Update-TweakButtonStates {
 }
 
 # Centralized data path for exports (in repo folder)
-function Load-MyDeviceStats {
+function Update-MyDeviceStats {
     try {
         $os = Get-CimInstance Win32_OperatingSystem; (Get-Ctrl "txtDeviceOS").Text = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
         $cpu = Get-CimInstance Win32_Processor; (Get-Ctrl "txtDeviceCPU").Text = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
-        $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); (Get-Ctrl "txtDeviceRAM").Text = "Total: ${tr}GB`nSpeed: $(($mem|Select -F 1).Speed)MHz`nModules: $($mem.Count)"
+        $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); (Get-Ctrl "txtDeviceRAM").Text = "Total: ${tr}GB`nSpeed: $(($mem | Select-Object -First 1).Speed)MHz`nModules: $($mem.Count)"
         # 4. GPU
         $gpu = Get-CimInstance Win32_VideoController
         $gpuText = ""
@@ -5026,33 +5026,61 @@ function Show-StartupManager {
         }
     }
 
+    function Get-StartupApprovedState {
+        param([string]$Type, [string]$RootPath, [string]$ValueName)
+        $approvedPath = ""
+        
+        if ($Type -eq "Registry") {
+            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+        }
+        else {
+            if ($RootPath -match "(?i)Roaming") {
+                $approvedPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
+            }
+            else {
+                $approvedPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
+            }
+        }
+    
+        if ($approvedPath -and (Test-Path $approvedPath)) {
+            $val = Get-ItemProperty -Path $approvedPath -ErrorAction SilentlyContinue
+            if ($null -ne $val.$ValueName) {
+                # Even = Enabled (0x02), Odd = Disabled (0x03)
+                return ($val.$ValueName[0] % 2 -eq 0)
+            }
+        }
+        return $true # If missing, it is enabled by default
+    }
     function Get-RegRunEntries([string]$Path, [string]$Scope) {
         $items = @()
         if (-not (Test-Path $Path)) { return $items }
-        $disabledPath = Join-Path $Path "WMT_Disabled"
-        foreach ($pair in @( @{ KeyPath = $Path; Enabled = $true }, @{ KeyPath = $disabledPath; Enabled = $false } )) {
-            if (-not (Test-Path $pair.KeyPath)) { continue }
-            $props = Get-ItemProperty -Path $pair.KeyPath -ErrorAction SilentlyContinue
-            if (-not $props) { continue }
-            foreach ($p in $props.PSObject.Properties) {
-                if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
-                $items += [PSCustomObject]@{
-                    Name = $p.Name; Command = "$($p.Value)"; Location = $pair.KeyPath; EntryType = "Registry"
-                    Scope = $Scope; Enabled = $pair.Enabled; ItemPath = $pair.KeyPath; ValueName = $p.Name; RootRunPath = $Path
-                }
+        
+        $props = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+        if (-not $props) { return $items }
+        
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
+            
+            $isEnabled = Get-StartupApprovedState -Type "Registry" -RootPath $Path -ValueName $p.Name
+            
+            $items += [PSCustomObject]@{
+                Name = $p.Name; Command = "$($p.Value)"; Location = $Path; EntryType = "Registry"
+                Scope = $Scope; Enabled = $isEnabled; ItemPath = $Path; ValueName = $p.Name; RootRunPath = $Path
             }
         }
         return $items
     }
-
+    
     function Get-StartupFolderEntries([string]$Path, [string]$Scope) {
         $items = @()
         if (-not (Test-Path $Path)) { return $items }
+        
         foreach ($file in (Get-ChildItem -Path $Path -File -ErrorAction SilentlyContinue)) {
-            $isDisabled = $file.Extension -eq ".disabled"
+            $isEnabled = Get-StartupApprovedState -Type "StartupFolder" -RootPath $Path -ValueName $file.Name
+            
             $items += [PSCustomObject]@{
                 Name = $file.BaseName; Command = $file.FullName; Location = $Path; EntryType = "StartupFolder"
-                Scope = $Scope; Enabled = (-not $isDisabled); ItemPath = $file.FullName; ValueName = ""
+                Scope = $Scope; Enabled = $isEnabled; ItemPath = $file.FullName; ValueName = $file.Name; RootRunPath = $Path
             }
         }
         return $items
@@ -5060,6 +5088,34 @@ function Show-StartupManager {
 
     # Tab 1: Windows Startup
     $winTab = New-TabPage "Windows"
+
+    # Helper function to set the native Windows enable/disable state
+    function Set-StartupApprovedState {
+        param([string]$Type, [string]$RootPath, [string]$ValueName, [bool]$Enable)
+        $approvedPath = ""
+        
+        if ($Type -eq "Registry") {
+            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+        }
+        else {
+            if ($RootPath -match "(?i)Roaming") {
+                $approvedPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
+            }
+            else {
+                $approvedPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
+            }
+        }
+
+        if (-not (Test-Path $approvedPath)) { New-Item -Path $approvedPath -Force | Out-Null }
+
+        # Generate 12-byte binary payload: [State(1)][Padding(3)][FileTime(8)]
+        $stateByte = if ($Enable) { [byte]0x02 } else { [byte]0x03 }
+        $timeBytes = [BitConverter]::GetBytes([DateTime]::Now.ToFileTime())
+        $payload = [byte[]]($stateByte, 0x00, 0x00, 0x00) + $timeBytes
+
+        Set-ItemProperty -Path $approvedPath -Name $ValueName -Value $payload -Type Binary -ErrorAction SilentlyContinue
+    }
+
     $LoadWindowsStartup = {
         $items = @()
         $items += Get-RegRunEntries "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" "Current User"
@@ -5106,44 +5162,22 @@ function Show-StartupManager {
 
     $btnWinEnable.Add_Click({
             foreach ($row in $winTab.Grid.SelectedRows) {
-                $type = "$($row.Cells["Type"].Value)"; $itemPath = "$($row.Cells["ItemPath"].Value)"
-                $valueName = "$($row.Cells["ValueName"].Value)"; $rootRunPath = "$($row.Cells["RootRunPath"].Value)"
-                $cmd = "$($row.Cells["Command"].Value)"
-
-                if ($type -eq "StartupFolder" -and $itemPath.EndsWith(".disabled")) {
-                    $newPath = $itemPath.Substring(0, $itemPath.Length - 9)
-                    try { Rename-Item -LiteralPath $itemPath -NewName (Split-Path -Leaf $newPath) -ErrorAction SilentlyContinue } catch {}
-                }
-                elseif ($type -eq "Registry" -and $itemPath -and $valueName) {
-                    if ($itemPath.EndsWith("\WMT_Disabled")) {
-                        if ($rootRunPath -and -not (Test-Path $rootRunPath)) { New-Item -Path $rootRunPath -Force | Out-Null }
-                        try { Set-ItemProperty -Path $rootRunPath -Name $valueName -Value $cmd -ErrorAction SilentlyContinue } catch {}
-                        try { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue } catch {}
-                    }
-                    else {
-                        try { Set-ItemProperty -Path $itemPath -Name $valueName -Value $cmd -ErrorAction SilentlyContinue } catch {}
-                    }
-                }
+                $type = "$($row.Cells["Type"].Value)"
+                $rootPath = "$($row.Cells["RootRunPath"].Value)"
+                $valueName = "$($row.Cells["ValueName"].Value)"
+            
+                Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $true
             }
             & $LoadWindowsStartup
         })
 
     $btnWinDisable.Add_Click({
             foreach ($row in $winTab.Grid.SelectedRows) {
-                $type = "$($row.Cells["Type"].Value)"; $itemPath = "$($row.Cells["ItemPath"].Value)"
-                $valueName = "$($row.Cells["ValueName"].Value)"; $rootRunPath = "$($row.Cells["RootRunPath"].Value)"
-                $cmd = "$($row.Cells["Command"].Value)"
-
-                if ($type -eq "StartupFolder" -and -not $itemPath.EndsWith(".disabled")) {
-                    $newName = (Split-Path -Leaf $itemPath) + ".disabled"
-                    try { Rename-Item -LiteralPath $itemPath -NewName $newName -ErrorAction SilentlyContinue } catch {}
-                }
-                elseif ($type -eq "Registry" -and $itemPath -and $valueName -and $itemPath -notmatch "\\WMT_Disabled$") {
-                    $disabledPath = Join-Path $rootRunPath "WMT_Disabled"
-                    if (-not (Test-Path $disabledPath)) { New-Item -Path $disabledPath -Force | Out-Null }
-                    try { Set-ItemProperty -Path $disabledPath -Name $valueName -Value $cmd -ErrorAction SilentlyContinue } catch {}
-                    try { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue } catch {}
-                }
+                $type = "$($row.Cells["Type"].Value)"
+                $rootPath = "$($row.Cells["RootRunPath"].Value)"
+                $valueName = "$($row.Cells["ValueName"].Value)"
+            
+                Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $false
             }
             & $LoadWindowsStartup
         })
@@ -6894,7 +6928,7 @@ $btnCtxBuilder = Get-Ctrl "btnCtxBuilder"
 
 $pnlUpdates = Get-Ctrl "pnlUpdates"
 $pnlCatalog = Get-Ctrl "pnlCatalog"
-$pnlMyDevice = Get-Ctrl "pnlMyDevice"
+#$pnlMyDevice = Get-Ctrl "pnlMyDevice"
 $btnMyDeviceCleanRAM = Get-Ctrl "btnMyDeviceCleanRAM"
 if ($btnMyDeviceCleanRAM) {
     $btnMyDeviceCleanRAM.Add_Click({
@@ -9914,7 +9948,7 @@ $window.Add_Loaded({
         # 3. Update tweak button states based on system
         Update-TweakButtonStates
         # 4. Load device hardware statistics into My Device panel
-        Load-MyDeviceStats
+        Update-MyDeviceStats
     })
 
 $window.Add_Closing({
