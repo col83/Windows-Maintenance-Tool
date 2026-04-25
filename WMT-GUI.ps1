@@ -145,6 +145,42 @@ function Update-TweakButtonStates {
 }
 
 # Centralized data path for exports (in repo folder)
+function Load-MyDeviceStats {
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem; (Get-Ctrl "txtDeviceOS").Text = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
+        $cpu = Get-CimInstance Win32_Processor; (Get-Ctrl "txtDeviceCPU").Text = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
+        $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); (Get-Ctrl "txtDeviceRAM").Text = "Total: ${tr}GB`nSpeed: $(($mem|Select -F 1).Speed)MHz`nModules: $($mem.Count)"
+        # 4. GPU
+        $gpu = Get-CimInstance Win32_VideoController
+        $gpuText = ""
+        foreach ($g in $gpu) {
+            $vram = 0
+            # Bypass WMI 4GB limit by checking the 64-bit registry key
+            $regMatches = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*" -EA Ignore | Where-Object { $_.DriverDesc -eq $g.Name }
+            
+            if ($regMatches) {
+                $reg = $regMatches[0]
+                if ($null -ne $reg.'HardwareInformation.qwMemorySize') {
+                    $vram = [math]::Round($reg.'HardwareInformation.qwMemorySize' / 1GB, 2)
+                }
+                elseif ($null -ne $reg.'HardwareInformation.MemorySize' -and $reg.'HardwareInformation.MemorySize' -isnot [byte[]]) {
+                    $vram = [math]::Round($reg.'HardwareInformation.MemorySize' / 1GB, 2)
+                }
+            }
+            
+            # Fallback to standard WMI if registry check fails
+            if ($vram -eq 0 -or $null -eq $vram) { 
+                $vram = [math]::Round([uint32]$g.AdapterRAM / 1GB, 2) 
+            }
+            
+            $gpuText += "$($g.Name)`nVRAM: $vram GB`nDriver: $($g.DriverVersion)`n"
+        }
+        (Get-Ctrl "txtDeviceGPU").Text = $gpuText.Trim()
+        $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; (Get-Ctrl "txtDeviceMotherboard").Text = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
+        $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; (Get-Ctrl "txtDeviceStorage").Text = $dt.Trim()
+    }
+    catch {}
+}
 function Get-DataPath {
     $root = Split-Path -Parent $PSCommandPath
     $dataPath = Join-Path $root "data"
@@ -5703,6 +5739,14 @@ function Set-Hags {
                         <Button Name="btnTabDrivers" Content="Drivers" Style="{StaticResource NavBtn}" Tag="pnlDrivers"/>
                         <Button Name="btnTabCleanup" Content="Cleanup" Style="{StaticResource NavBtn}" Tag="pnlCleanup"/>
                         <Button Name="btnTabUtils" Content="Utilities" Style="{StaticResource NavBtn}" Tag="pnlUtils"/>
+                        <Button Name="btnTabMyDevice" Style="{StaticResource NavBtn}" Tag="pnlMyDevice">
+                            <StackPanel Orientation="Horizontal">
+                                <Path Data="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7v2H8v2h8v-2h-2v-2h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z" 
+                                      Fill="White" 
+                                      Width="16" Height="16" Stretch="Uniform" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                                <TextBlock Text="My Device" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
                         <Button Name="btnTabSupport" Content="Support" Style="{StaticResource NavBtn}" Tag="pnlSupport"/>
                         <Button Name="btnNavDownloads" Content="Download Stats" Style="{StaticResource NavBtn}" ToolTip="Show latest release download counts"/>
                     </StackPanel>
@@ -6067,9 +6111,86 @@ function Set-Hags {
                             </WrapPanel>
                         </StackPanel>
                     </Border>
-                </StackPanel>
+                                </StackPanel>
 
-                <!-- FIREWALL PANEL -->
+                                <!-- MY DEVICE PANEL -->
+                                <ScrollViewer Name="pnlMyDevice" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                        <WrapPanel Margin="20" ItemWidth="350">
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M0 3.4l10-1.4v9H0V3.4zm11-1.5L23 0v11H11V1.9zM0 12h10v8.6l-10-1.4V12zm11 0h12v10l-12-1.9V12z"/>
+                                                        </Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Operating System" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceOS" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M6 6h12v12H6V6zm-2 2H2v2h2v4H2v2h2v2h2v2h2v-2h4v2h2v-2h2v-2h2v-2h-2V8h2V6h-2V4h-2v2h-4V4H8v2H6v2z"/>
+                                                        </Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Processor (CPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceCPU" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M2 6h20a2 2 0 012 2v4a2 2 0 01-2 2H2a2 2 0 01-2-2V8a2 2 0 012-2zm2 8v3h2v-3H4zm4 0v3h2v-3H8zm4 0v3h2v-3h-2zm4 0v3h2v-3h-2z"/>
+                                                        </Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M2 4h20v12H2V4zm10 2a4 4 0 100 8 4 4 0 000-8zm0 2a2 2 0 110 4 2 2 0 010-4z"/>
+                                                        </Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceGPU" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M4 2h16a2 2 0 012 2v16a2 2 0 01-2 2H4a2 2 0 01-2-2V4a2 2 0 012-2zm4 4v4h8V6H8zm-4 8h16v2H4v-2z"/>
+                                                        </Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Motherboard" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceMotherboard" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M12 2C6.48 2 2 3.79 2 6v12c0 2.21 4.48 4 10 4s10-1.79 10-4V6c0-2.21-4.48-4-10-4zm0 6c-4.42 0-8-1.34-8-3s3.58-3 8-3 8 1.34 8 3-3.58 3-8 3zm0 4c-4.42 0-8-1.34-8-3v1.5c0 1.66 3.58 3 8 3s8-1.34 8-3V9c0 1.66-3.58 3-8 3zm0 6c-4.42 0-8-1.34-8-3v1.5c0 1.66 3.58 3 8 3s8-1.34 8-3V15c0 1.66-3.58 3-8 3z"/>
+                                                        </Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+                                        </WrapPanel>
+                                </ScrollViewer>
+
+                                <!-- FIREWALL PANEL -->
                 <Grid Name="pnlFirewall" Visibility="Collapsed">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -6514,8 +6635,8 @@ Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2
 # ==========================================
 # 5. LOGIC & EVENTS
 # ==========================================
-$TabButtons = @("btnTabUpdates", "btnTabTweaks", "btnTabHealth", "btnTabNetwork", "btnTabFirewall", "btnTabDrivers", "btnTabCleanup", "btnTabUtils", "btnTabSupport")
-$Panels = @("pnlUpdates", "pnlCatalog", "pnlTweaks", "pnlHealth", "pnlNetwork", "pnlFirewall", "pnlDrivers", "pnlCleanup", "pnlUtils", "pnlSupport")
+$TabButtons = @("btnTabUpdates", "btnTabTweaks", "btnTabHealth", "btnTabNetwork", "btnTabFirewall", "btnTabDrivers", "btnTabCleanup", "btnTabUtils", "btnTabMyDevice", "btnTabSupport")
+$Panels = @("pnlUpdates", "pnlCatalog", "pnlTweaks", "pnlHealth", "pnlNetwork", "pnlMyDevice", "pnlFirewall", "pnlDrivers", "pnlCleanup", "pnlUtils", "pnlSupport")
 
 # --- INITIALIZE ALL CONTROLS ---
 $btnManageProviders = Get-Ctrl "btnManageProviders"
@@ -6646,6 +6767,7 @@ $btnCtxBuilder = Get-Ctrl "btnCtxBuilder"
 
 $pnlUpdates = Get-Ctrl "pnlUpdates"
 $pnlCatalog = Get-Ctrl "pnlCatalog"
+$pnlMyDevice = Get-Ctrl "pnlMyDevice"
 $lstCatalog = Get-Ctrl "lstCatalog"
 $txtCatalogSearch = Get-Ctrl "txtCatalogSearch"
 $btnShowCatalog = Get-Ctrl "btnShowCatalog"
@@ -9541,6 +9663,8 @@ $window.Add_Loaded({
         Start-UpdateCheckBackground
         # 3. Update tweak button states based on system
         Update-TweakButtonStates
+        # 4. Load device hardware statistics into My Device panel
+        Load-MyDeviceStats
     })
 
 $window.Add_Closing({
