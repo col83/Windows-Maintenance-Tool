@@ -7008,6 +7008,22 @@ Add-SearchIndexEntry "btnCtxBuilder" "Custom Context Menu Builder" "btnTabUtils"
 Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
 Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
 
+# 9. My Device
+Add-SearchIndexEntry "btnMyDeviceCleanRAM" "Clean RAM" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceGPUDriver" "Check GPU Drivers" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceTrim" "Trim / Defrag Storage Drives" "btnTabMyDevice"
+
+# 10. Catalog & Providers
+Add-SearchIndexEntry "btnShowCatalog" "Software Catalog" "btnTabUpdates"
+Add-SearchIndexEntry "btnManageProviders" "Manage Package Providers" "btnTabUpdates"
+
+# 11. Common Tweaks
+Add-SearchIndexEntry "btnSvcOptimize" "Optimize System Services" "btnTabTweaks"
+Add-SearchIndexEntry "btnSvcRestore" "Restore Default Services" "btnTabTweaks"
+Add-SearchIndexEntry "btnWUDisable" "Disable Windows Updates" "btnTabTweaks"
+Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
+Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
+
 $txtGlobalSearch.Add_TextChanged({
         $q = $txtGlobalSearch.Text
         if ($q.Length -gt 1 -and $q -ne $script:QuickFindPlaceholder) {
@@ -7018,7 +7034,27 @@ $txtGlobalSearch.Add_TextChanged({
         }
         else { $pnlNavButtons.Visibility = "Visible"; $lstSearchResults.Visibility = "Collapsed" }
     })
-$lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $match = $SearchIndex[$lstSearchResults.SelectedItem]; (Get-Ctrl $match.Tab).RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))); $txtGlobalSearch.Text = "" } })
+$lstSearchResults.Add_SelectionChanged({
+        if ($lstSearchResults.SelectedItem) {
+            $match = $SearchIndex[$lstSearchResults.SelectedItem]
+        
+            # 1. Switch to the appropriate tab so the button is rendered and visible
+            if ($match.Tab) {
+                $tabBtn = Get-Ctrl $match.Tab
+                if ($tabBtn) {
+                    $tabBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+                }
+            }
+        
+            # 2. Fire the actual button's click event to launch the target function
+            if ($match.Button) {
+                $match.Button.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+            }
+        
+            # Clear the search box after executing
+            $txtGlobalSearch.Text = ""
+        }
+    })
 
 
 # WINGET CONTEXT MENU (Right-Click)
