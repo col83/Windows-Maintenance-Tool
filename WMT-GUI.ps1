@@ -484,8 +484,6 @@ function Start-UpdateCheckBackground {
     $script:UpdateTimer.Start()
 }
 
-# --- RESTORED LOGIC ---
-
 function Start-UpdateRepair {
     Invoke-UiCommand {
         Stop-Service -Name wuauserv, bits, cryptsvc, msiserver -Force -ErrorAction SilentlyContinue
@@ -5362,6 +5360,34 @@ function Show-StartupManager {
     $f.ShowDialog() | Out-Null
 }
 
+# --- Tweaks Functions ---
+function Set-Hags {
+    param([bool]$Enable)
+    
+    if ($Enable) {
+        Invoke-UiCommand {
+            $path = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+                
+            Set-ItemProperty -Path $path -Name "HwSchMode" -Value 2 -Type DWord
+            Write-Output "Hardware-Accelerated GPU Scheduling (HAGS) enabled. Reboot required."
+                
+            [System.Windows.MessageBox]::Show("HAGS enabled successfully. Please restart your computer to apply the changes.", "HAGS Status", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } "Enabling HAGS..."
+    }
+    else {
+        Invoke-UiCommand {
+            $path = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+                
+            Set-ItemProperty -Path $path -Name "HwSchMode" -Value 1 -Type DWord
+            Write-Output "Hardware-Accelerated GPU Scheduling (HAGS) disabled. Reboot required."
+                
+            [System.Windows.MessageBox]::Show("HAGS disabled successfully. Please restart your computer to apply the changes.", "HAGS Status", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } "Disabling HAGS..."
+    }
+}
+
 # ==========================================
 # 3. XAML GUI
 # ==========================================
@@ -5846,6 +5872,8 @@ function Show-StartupManager {
                             <Button Name="btnPerfDisableMemCompress" Content="Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Disable memory compression. RAM stores data uncompressed. May improve performance on high-RAM systems."/>
                             <Button Name="btnPerfEnableMemCompress" Content="Enable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Enable memory compression. Windows compresses inactive RAM pages to free up physical memory for active apps."/>
                             <Button Name="btnPerfUltimatePower" Content="Ultimate Performance" Style="{StaticResource PositiveBtn}" ToolTip="Enable the Ultimate Performance power plan. Removes all power throttling for maximum performance. Best for desktops and high-performance laptops."/>
+                            <Button Name="btnPerfEnableHags" Content="Enable HAGS" Style="{StaticResource ActionBtn}" ToolTip="Turn on Hardware-Accelerated GPU Scheduling for better VRAM management and lower latency." />
+                            <Button Name="btnPerfDisableHags" Content="Disable HAGS" Style="{StaticResource ActionBtn}" ToolTip="Turn off Hardware-Accelerated GPU Scheduling." />
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -8992,6 +9020,15 @@ $btnPerfUltimatePower.Add_Click({
             Write-GuiLog "Ultimate Performance power plan enabled."
         } "Enabling Ultimate Performance..."
     })
+$btnPerfEnableHags = Get-Ctrl "btnPerfEnableHags"
+$btnPerfDisableHags = Get-Ctrl "btnPerfDisableHags"
+if ($btnPerfEnableHags) {
+    $btnPerfEnableHags.Add_Click({ Set-Hags -Enable $true })
+}
+if ($btnPerfDisableHags) {
+    $btnPerfDisableHags.Add_Click({ Set-Hags -Enable $false })
+}
+    
 
 # --- APPX BLOATWARE REMOVAL ---
 $script:AppxList = @(
@@ -9277,7 +9314,7 @@ if ($btnClockSecsOff) {
                 Stop-Process -Name explorer -Force
             } "Hiding seconds on the system clock..."
         })
-} # <--- THIS is the brace that was missing!
+}
     
 if ($btnHideSearch) {
     $btnHideSearch.Add_Click({
