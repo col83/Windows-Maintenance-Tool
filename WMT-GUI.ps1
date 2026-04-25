@@ -124,6 +124,26 @@ function Invoke-UiCommand {
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 
+function Update-TweakButtonStates {
+    try {
+        $h = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -EA Ignore).HwSchMode
+        (Get-Ctrl "btnPerfEnableHags").IsEnabled = ($h -ne 2); (Get-Ctrl "btnPerfDisableHags").IsEnabled = ($h -eq 2)
+        $sm = Get-Service "SysMain" -EA Ignore; if ($sm) { $d = ($sm.StartType -eq 'Disabled'); (Get-Ctrl "btnPerfDisableSuperfetch").IsEnabled = (-not $d); (Get-Ctrl "btnPerfEnableSuperfetch").IsEnabled = $d }
+        $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        $ta = (Get-ItemProperty $ap -Name "TaskbarAl" -EA Ignore).TaskbarAl; (Get-Ctrl "btnTaskbarLeft").IsEnabled = ($ta -ne 0); (Get-Ctrl "btnTaskbarCenter").IsEnabled = ($ta -eq 0 -or $null -eq $ta)
+        $tc = (Get-ItemProperty $ap -Name "TaskbarGlomLevel" -EA Ignore).TaskbarGlomLevel; (Get-Ctrl "btnNeverCombine").IsEnabled = ($tc -ne 2); (Get-Ctrl "btnAlwaysCombine").IsEnabled = ($tc -eq 2 -or $null -eq $tc)
+        $is24 = ([string](Get-ItemProperty "HKCU:\Control Panel\International" -Name "sShortTime" -EA Ignore).sShortTime -cmatch "H")
+        (Get-Ctrl "btnClock24").IsEnabled = (-not $is24); (Get-Ctrl "btnClock12").IsEnabled = $is24
+        $cs = (Get-ItemProperty $ap -Name "ShowSecondsInSystemClock" -EA Ignore).ShowSecondsInSystemClock; (Get-Ctrl "btnClockSecsOn").IsEnabled = ($cs -ne 1); (Get-Ctrl "btnClockSecsOff").IsEnabled = ($cs -eq 1 -or $null -eq $cs)
+        $smode = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" -Name "SearchboxTaskbarMode" -EA Ignore).SearchboxTaskbarMode
+        (Get-Ctrl "btnHideSearch").IsEnabled = ($smode -ne 0); (Get-Ctrl "btnSearchIcon").IsEnabled = ($smode -ne 1)
+        (Get-Ctrl "btnHideWidgets").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarDa" -EA Ignore).TaskbarDa -ne 0)
+        (Get-Ctrl "btnHideTaskView").IsEnabled = ((Get-ItemProperty $ap -Name "ShowTaskViewButton" -EA Ignore).ShowTaskViewButton -ne 0)
+        (Get-Ctrl "btnHideChat").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarMn" -EA Ignore).TaskbarMn -ne 0)
+    }
+    catch {}
+}
+
 # Centralized data path for exports (in repo folder)
 function Get-DataPath {
     $root = Split-Path -Parent $PSCommandPath
@@ -8952,6 +8972,7 @@ $btnPerfServicesManual.Add_Click({
             }
             Write-GuiLog "Services optimization complete!"
         } "Optimizing services..."
+        Update-TweakButtonStates
     })
 
 $btnPerfServicesRevert.Add_Click({
@@ -8967,6 +8988,7 @@ $btnPerfServicesRevert.Add_Click({
             }
             Write-GuiLog "Services restored to default!"
         } "Reverting services..."
+        Update-TweakButtonStates
     })
 
 $btnPerfDisableHibernate.Add_Click({
@@ -8974,6 +8996,7 @@ $btnPerfDisableHibernate.Add_Click({
             powercfg /hibernate off
             Write-GuiLog "Hibernation disabled. Disk space freed."
         } "Disabling hibernation..."
+        Update-TweakButtonStates
     })
 
 $btnPerfEnableHibernate.Add_Click({
@@ -8981,6 +9004,7 @@ $btnPerfEnableHibernate.Add_Click({
             powercfg /hibernate on
             Write-GuiLog "Hibernation enabled."
         } "Enabling hibernation..."
+        Update-TweakButtonStates
     })
 
 $btnPerfDisableSuperfetch.Add_Click({
@@ -8989,6 +9013,7 @@ $btnPerfDisableSuperfetch.Add_Click({
             Set-Service -Name SysMain -StartupType Disabled
             Write-GuiLog "Superfetch/SysMain disabled."
         } "Disabling Superfetch..."
+        Update-TweakButtonStates
     })
 
 $btnPerfEnableSuperfetch.Add_Click({
@@ -8997,6 +9022,7 @@ $btnPerfEnableSuperfetch.Add_Click({
             Start-Service -Name SysMain -ErrorAction SilentlyContinue
             Write-GuiLog "Superfetch/SysMain enabled."
         } "Enabling Superfetch..."
+        Update-TweakButtonStates
     })
 
 $btnPerfDisableMemCompress.Add_Click({
@@ -9004,6 +9030,7 @@ $btnPerfDisableMemCompress.Add_Click({
             Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
             Write-GuiLog "Memory compression disabled."
         } "Disabling memory compression..."
+        Update-TweakButtonStates
     })
 
 $btnPerfEnableMemCompress.Add_Click({
@@ -9011,6 +9038,7 @@ $btnPerfEnableMemCompress.Add_Click({
             Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
             Write-GuiLog "Memory compression enabled."
         } "Enabling memory compression..."
+        Update-TweakButtonStates
     })
 
 $btnPerfUltimatePower.Add_Click({
@@ -9019,14 +9047,15 @@ $btnPerfUltimatePower.Add_Click({
             powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61
             Write-GuiLog "Ultimate Performance power plan enabled."
         } "Enabling Ultimate Performance..."
+        Update-TweakButtonStates
     })
 $btnPerfEnableHags = Get-Ctrl "btnPerfEnableHags"
 $btnPerfDisableHags = Get-Ctrl "btnPerfDisableHags"
 if ($btnPerfEnableHags) {
-    $btnPerfEnableHags.Add_Click({ Set-Hags -Enable $true })
+    $btnPerfEnableHags.Add_Click({ Set-Hags -Enable $true; Update-TweakButtonStates })
 }
 if ($btnPerfDisableHags) {
-    $btnPerfDisableHags.Add_Click({ Set-Hags -Enable $false })
+    $btnPerfDisableHags.Add_Click({ Set-Hags -Enable $false; Update-TweakButtonStates })
 }
     
 
@@ -9266,6 +9295,7 @@ if ($btnTaskbarLeft) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarAl" -Value 0 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Aligning taskbar to the left... (Explorer will restart)"
+            Update-TweakButtonStates
         })
 }
     
@@ -9275,6 +9305,7 @@ if ($btnTaskbarCenter) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarAl" -Value 1 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Aligning taskbar to the center... (Explorer will restart)"
+            Update-TweakButtonStates
         })
 }
     
@@ -9285,6 +9316,7 @@ if ($btnClock24) {
                 Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sTimeFormat" -Value "HH:mm:ss" -Force
                 Stop-Process -Name explorer -Force
             } "Setting system clock to 24-hour format..."
+            Update-TweakButtonStates
         })
 }
     
@@ -9295,6 +9327,7 @@ if ($btnClock12) {
                 Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sTimeFormat" -Value "h:mm:ss tt" -Force
                 Stop-Process -Name explorer -Force
             } "Setting system clock to 12-hour format..."
+            Update-TweakButtonStates
         })
 }
     
@@ -9304,6 +9337,7 @@ if ($btnClockSecsOn) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowSecondsInSystemClock" -Value 1 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Enabling seconds on the system clock..."
+            Update-TweakButtonStates
         })
 }
     
@@ -9313,6 +9347,7 @@ if ($btnClockSecsOff) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowSecondsInSystemClock" -Value 0 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Hiding seconds on the system clock..."
+            Update-TweakButtonStates
         })
 }
     
@@ -9322,6 +9357,7 @@ if ($btnHideSearch) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" -Name "SearchboxTaskbarMode" -Value 0 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Hiding Taskbar Search..."
+            Update-TweakButtonStates
         })
 }
             
@@ -9331,6 +9367,7 @@ if ($btnSearchIcon) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" -Name "SearchboxTaskbarMode" -Value 1 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Setting Taskbar Search to Icon only..."
+            Update-TweakButtonStates
         })
 }
             
@@ -9340,6 +9377,7 @@ if ($btnHideWidgets) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarDa" -Value 0 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Hiding Taskbar Widgets..."
+            Update-TweakButtonStates
         })
 }
             
@@ -9349,6 +9387,7 @@ if ($btnHideTaskView) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Hiding Task View button..."
+            Update-TweakButtonStates
         })
 }
             
@@ -9358,6 +9397,7 @@ if ($btnHideChat) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarMn" -Value 0 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Hiding Chat icon..."
+            Update-TweakButtonStates
         })
 }
             
@@ -9367,6 +9407,7 @@ if ($btnNeverCombine) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarGlomLevel" -Value 2 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Setting taskbar to never combine buttons..."
+            Update-TweakButtonStates
         })
 }
             
@@ -9376,6 +9417,7 @@ if ($btnAlwaysCombine) {
                 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarGlomLevel" -Value 0 -Type DWord -Force
                 Stop-Process -Name explorer -Force
             } "Restoring default taskbar combining..."
+            Update-TweakButtonStates
         })
 }
 
@@ -9497,6 +9539,8 @@ $window.Add_Loaded({
     
         # 2. Trigger the background update check
         Start-UpdateCheckBackground
+        # 3. Update tweak button states based on system
+        Update-TweakButtonStates
     })
 
 $window.Add_Closing({
