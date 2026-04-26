@@ -4472,7 +4472,7 @@ Start-Sleep -Seconds 8
 function Show-SystemRestoreManager {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "System Restore Manager"
-    $f.Size = "980, 580"
+    $f.Size = "980, 620" # Slightly taller to fit the new button row
     $f.StartPosition = "CenterScreen"
     $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $f.ForeColor = [System.Drawing.Color]::White
@@ -4505,7 +4505,7 @@ function Show-SystemRestoreManager {
 
     $pnl = New-Object System.Windows.Forms.Panel
     $pnl.Dock = "Bottom"
-    $pnl.Height = 90
+    $pnl.Height = 130 # Increased height for two rows of buttons
     $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $f.Controls.Add($pnl)
 
@@ -4517,10 +4517,11 @@ function Show-SystemRestoreManager {
     $lbl.ForeColor = [System.Drawing.Color]::LightGray
     $pnl.Controls.Add($lbl)
 
-    function New-RestoreBtn($text, $x, $color = $null) {
+    # Updated to accept a $y parameter for rows
+    function New-RestoreBtn($text, $x, $y, $color = $null) {
         $b = New-Object System.Windows.Forms.Button
         $b.Text = $text
-        $b.Left = $x; $b.Top = 35; $b.Width = 145; $b.Height = 38
+        $b.Left = $x; $b.Top = $y; $b.Width = 145; $b.Height = 38
         $b.FlatStyle = "Flat"
         $b.FlatAppearance.BorderSize = 1
         $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#444444")
@@ -4537,11 +4538,17 @@ function Show-SystemRestoreManager {
         return $b
     }
 
-    $btnRefresh = New-RestoreBtn "Refresh" 20
-    $btnCreate = New-RestoreBtn "Create Point" 180 "#006600"
-    $btnDelete = New-RestoreBtn "Delete Selected" 340 "#802020"
-    $btnOpenUi = New-RestoreBtn "Open Restore UI" 500
-    $btnClose = New-RestoreBtn "Close" 660
+    # --- ROW 1 ---
+    $btnRefresh = New-RestoreBtn "Refresh" 20 35
+    $btnEnable = New-RestoreBtn "Enable Protection" 180 35 "#004080"
+    $btnDisable = New-RestoreBtn "Disable Protection" 340 35 "#804000"
+    $btnCreate = New-RestoreBtn "Create Point" 500 35 "#006600"
+    $btnDelete = New-RestoreBtn "Delete Selected" 660 35 "#802020"
+    
+    # --- ROW 2 ---
+    $btnRestore = New-RestoreBtn "Restore Selected" 20 80 "#A06000"
+    $btnOpenUi = New-RestoreBtn "Open Restore UI" 180 80
+    $btnClose = New-RestoreBtn "Close" 800 80
 
     $script:RestorePointRows = @()
 
@@ -4577,19 +4584,47 @@ function Show-SystemRestoreManager {
         $lbl.Text = "Restore points: $($dt.Rows.Count)"
     }
 
+    # BUTTON LOGIC
+
     $btnRefresh.Add_Click({ & $LoadRestorePoints })
+    
+    $btnEnable.Add_Click({
+            try {
+                Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop
+                [System.Windows.Forms.MessageBox]::Show("System Restore has been ENABLED on $env:SystemDrive.", "Success", "OK", "Information") | Out-Null
+                & $LoadRestorePoints
+            }
+            catch {
+                [System.Windows.Forms.MessageBox]::Show("Failed to enable protection.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
+            }
+        })
+
+    $btnDisable.Add_Click({
+            $res = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to disable System Restore on $env:SystemDrive?`n`nWARNING: This will immediately delete ALL existing restore points.", "Confirm Disable", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($res -ne "Yes") { return }
+            try {
+                Disable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop
+                [System.Windows.Forms.MessageBox]::Show("System Restore has been DISABLED.", "Success", "OK", "Information") | Out-Null
+                & $LoadRestorePoints
+            }
+            catch {
+                [System.Windows.Forms.MessageBox]::Show("Failed to disable protection.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
+            }
+        })
+
     $btnCreate.Add_Click({
             $desc = [Microsoft.VisualBasic.Interaction]::InputBox("Description for the restore point:", "Create Restore Point", "WMT Manual Restore Point")
             if ([string]::IsNullOrWhiteSpace($desc)) { return }
             try {
                 Checkpoint-Computer -Description $desc -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop | Out-Null
-                [System.Windows.Forms.MessageBox]::Show("Restore point created.", "System Restore Manager", "OK", "Information") | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Restore point created successfully.", "Success", "OK", "Information") | Out-Null
             }
             catch {
-                [System.Windows.Forms.MessageBox]::Show("Failed to create restore point.`n$($_.Exception.Message)", "System Restore Manager", "OK", "Error") | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Failed to create restore point.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
             }
             & $LoadRestorePoints
         })
+
     $btnDelete.Add_Click({
             if ($dg.SelectedRows.Count -eq 0) { return }
             $count = $dg.SelectedRows.Count
@@ -4598,25 +4633,25 @@ function Show-SystemRestoreManager {
 
             $ok = 0
             $fail = 0
-            $sysRestore = $null
-            try { $sysRestore = [WMIClass]"root/default:SystemRestore" } catch {}
-            if (-not $sysRestore) {
-                [System.Windows.Forms.MessageBox]::Show("Could not access SystemRestore WMI class.", "System Restore Manager", "OK", "Error") | Out-Null
-                return
+        
+            if (-not ([System.Management.Automation.PSTypeName]'Win32.SysRestoreAPI').Type) {
+                $apiCode = '[DllImport("srclient.dll")] public static extern int SRRemoveRestorePoint(int index);'
+                Add-Type -MemberDefinition $apiCode -Name "SysRestoreAPI" -Namespace "Win32" -ErrorAction SilentlyContinue
             }
 
             foreach ($row in $dg.SelectedRows) {
                 $seq = 0
                 try { $seq = [int]$row.Cells["SequenceNumber"].Value } catch {}
                 if ($seq -le 0) { $fail++; continue }
+            
                 try {
-                    $ret = $sysRestore.RemoveRestorePoint($seq)
-                    if ($ret.ReturnValue -eq 0) { 
+                    $ret = [Win32.SysRestoreAPI]::SRRemoveRestorePoint($seq)
+                    if ($ret -eq 0) { 
                         $ok++ 
                     }
                     else { 
                         $fail++
-                        [System.Windows.Forms.MessageBox]::Show("Deletion failed for Sequence $seq. Return Code: $($ret.ReturnValue)", "Error Details")
+                        [System.Windows.Forms.MessageBox]::Show("Deletion failed for Sequence $seq. Windows Error Code: $ret", "Error Details")
                     }
                 }
                 catch { 
@@ -4624,9 +4659,32 @@ function Show-SystemRestoreManager {
                     [System.Windows.Forms.MessageBox]::Show("Exception for Sequence ${seq}: $($_.Exception.Message)", "Error Details")
                 }
             }
-            [System.Windows.Forms.MessageBox]::Show("Deleted: $ok`nFailed: $fail", "System Restore Manager", "OK", "Information") | Out-Null
+        
+            [System.Windows.Forms.MessageBox]::Show("Deleted: $ok`nFailed: $fail", "Deletion Complete", "OK", "Information") | Out-Null
             & $LoadRestorePoints
         })
+
+    $btnRestore.Add_Click({
+            if ($dg.SelectedRows.Count -ne 1) {
+                [System.Windows.Forms.MessageBox]::Show("Please select exactly ONE restore point to restore.", "Notice", "OK", "Warning") | Out-Null
+                return
+            }
+
+            $seq = 0
+            try { $seq = [int]$dg.SelectedRows[0].Cells["SequenceNumber"].Value } catch {}
+            if ($seq -le 0) { return }
+
+            $res = [System.Windows.Forms.MessageBox]::Show("WARNING: This will restore your system to Sequence $seq and RESTART your computer immediately.`n`nPlease save all open work before proceeding.`n`nProceed with System Restore?", "Confirm Restore", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($res -ne "Yes") { return }
+
+            try {
+                Restore-Computer -RestorePoint $seq -Confirm:$false
+            }
+            catch {
+                [System.Windows.Forms.MessageBox]::Show("Failed to initialize restore.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
+            }
+        })
+    
     $btnOpenUi.Add_Click({ Start-Process "rstrui.exe" })
     $btnClose.Add_Click({ $f.Close() })
 
