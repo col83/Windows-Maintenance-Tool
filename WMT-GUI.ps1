@@ -4611,9 +4611,18 @@ function Show-SystemRestoreManager {
                 if ($seq -le 0) { $fail++; continue }
                 try {
                     $ret = $sysRestore.RemoveRestorePoint($seq)
-                    if ($ret.ReturnValue -eq 0) { $ok++ } else { $fail++ }
+                    if ($ret.ReturnValue -eq 0) { 
+                        $ok++ 
+                    }
+                    else { 
+                        $fail++
+                        [System.Windows.Forms.MessageBox]::Show("Deletion failed for Sequence $seq. Return Code: $($ret.ReturnValue)", "Error Details")
+                    }
                 }
-                catch { $fail++ }
+                catch { 
+                    $fail++
+                    [System.Windows.Forms.MessageBox]::Show("Exception for Sequence ${seq}: $($_.Exception.Message)", "Error Details")
+                }
             }
             [System.Windows.Forms.MessageBox]::Show("Deleted: $ok`nFailed: $fail", "System Restore Manager", "OK", "Information") | Out-Null
             & $LoadRestorePoints
