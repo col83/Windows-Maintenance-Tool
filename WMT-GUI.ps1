@@ -4280,112 +4280,6 @@ function Show-RuleDialog {
     return $null
 }
 
-# --- TASK SCHEDULER MANAGER (styled to match Firewall UI) ---
-function Show-TaskManager {
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Task Scheduler Manager"
-    $f.Size = "900, 600"
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.ForeColor = [System.Drawing.Color]::White
-
-    $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Top"
-    $dg.Height = 450
-    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.ForeColor = [System.Drawing.Color]::White
-    $dg.AutoSizeColumnsMode = "Fill"
-    $dg.SelectionMode = "FullRowSelect"
-    $dg.MultiSelect = $false
-    $dg.ReadOnly = $true
-    $dg.RowHeadersVisible = $false
-    $dg.AllowUserToAddRows = $false
-    $dg.BorderStyle = "None"
-    $dg.EnableHeadersVisualStyles = $false
-    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
-    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
-    $dg.ColumnHeadersHeight = 30
-    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
-    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
-    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
-    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
-    $f.Controls.Add($dg)
-
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 80
-    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.Controls.Add($pnl)
-
-    function New-StyledBtn ($Text, $X, $Color = $null) {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $Text
-        $b.Top = 20; $b.Left = $X; $b.Width = 100; $b.Height = 35
-        $b.FlatStyle = "Flat"
-        $b.FlatAppearance.BorderSize = 1
-        $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#444444")
-        $b.ForeColor = [System.Drawing.Color]::White
-        if ($Color) {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($Color)
-            $b.FlatAppearance.MouseOverBackColor = [System.Windows.Forms.ControlPaint]::Light($b.BackColor)
-        }
-        else {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
-        }
-        $pnl.Controls.Add($b)
-        return $b
-    }
-
-    $btnRef = New-StyledBtn "Refresh" 20
-    $btnEn = New-StyledBtn "Enable" 130 "#006600"
-    $btnDis = New-StyledBtn "Disable" 240 "#CCAA00"
-    $btnDel = New-StyledBtn "Delete" 350 "#802020"
-
-    $dg.Add_RowPrePaint({
-            param($src, $e)
-            $row = $src.Rows[$e.RowIndex]
-            if ($row.Cells["State"].Value) {
-                $state = $row.Cells["State"].Value.ToString()
-                if ($state -eq "Running") {
-                    $row.DefaultCellStyle.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#00FF00")
-                }
-                elseif ($state -eq "Ready") {
-                    $row.DefaultCellStyle.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#FFFF00")
-                }
-                elseif ($state -eq "Disabled") {
-                    $row.DefaultCellStyle.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#FF3333")
-                }
-                else {
-                    $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGray
-                }
-            }
-        })
-
-    $LoadTasks = {
-        $tasks = Get-ScheduledTask | Select-Object TaskName, State, Author, TaskPath
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("TaskName"); $dt.Columns.Add("State"); $dt.Columns.Add("Author"); $dt.Columns.Add("Path")
-        foreach ($t in $tasks) {
-            $r = $dt.NewRow()
-            $r["TaskName"] = $t.TaskName; $r["State"] = $t.State; $r["Author"] = $t.Author; $r["Path"] = $t.TaskPath
-            $dt.Rows.Add($r)
-        }
-        $dg.DataSource = $dt
-        $dg.ClearSelection()
-    }
-
-    $btnRef.Add_Click({ & $LoadTasks })
-    $btnEn.Add_Click({ if ($dg.SelectedRows.Count -gt 0) { $n = $dg.SelectedRows[0].Cells["TaskName"].Value; Enable-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue; & $LoadTasks } })
-    $btnDis.Add_Click({ if ($dg.SelectedRows.Count -gt 0) { $n = $dg.SelectedRows[0].Cells["TaskName"].Value; Disable-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue; & $LoadTasks } })
-    $btnDel.Add_Click({ if ($dg.SelectedRows.Count -gt 0) { $n = $dg.SelectedRows[0].Cells["TaskName"].Value; if ([System.Windows.Forms.MessageBox]::Show("Delete $n?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { Unregister-ScheduledTask -TaskName $n -Confirm:$false; & $LoadTasks } } })
-    & $LoadTasks; $f.ShowDialog()
-}
-
 # --- WINRE STATUS CHECK ---
 function Invoke-WinREStatusCheck {
     Invoke-UiCommand {
@@ -4733,6 +4627,7 @@ function Show-SystemRestoreManager {
 
 # --- STARTUP MANAGER (Windows / Tasks / Context Menu / Services) ---
 function Show-StartupManager {
+    param([string]$DefaultTab = "Windows")
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Startup Manager"
     $f.Size = "1220, 720"
@@ -4818,9 +4713,9 @@ function Show-StartupManager {
     }
 
     $btnWinTab = New-TabBtn "Windows" 14
-    New-TabBtn "Scheduled Tasks" 180 | Out-Null
-    New-TabBtn "Context Menu" 346 | Out-Null
-    New-TabBtn "Services" 512 | Out-Null
+    $btnTaskTab = New-TabBtn "Scheduled Tasks" 180
+    $btnCtxTab = New-TabBtn "Context Menu" 346
+    $btnSvcTab = New-TabBtn "Services" 512
 
     # --- 4. VIEW FACTORY ---
     function New-TabPage([string]$title) {
@@ -5082,6 +4977,7 @@ function Show-StartupManager {
         }
         return $true
     }
+    
     function Get-RegRunEntries([string]$Path, [string]$Scope) {
         $items = @()
         if (-not (Test-Path $Path)) { return $items }
@@ -5186,7 +5082,7 @@ function Show-StartupManager {
         if ($winTab.Grid.Columns["Location"]) { $winTab.Grid.Columns["Location"].Visible = $false }
         if ($winTab.Grid.Columns["Command"]) { $winTab.Grid.Columns["Command"].Visible = $false }
         
-        Update-TabFilter -TabObj $winTab # Ensure search box state persists on hard refreshes
+        Update-TabFilter -TabObj $winTab
     }
 
     $btnWinRefresh = New-StartupBtn $winTab.Panel "Refresh" 15
@@ -5205,7 +5101,6 @@ function Show-StartupManager {
             foreach ($row in $winTab.Grid.SelectedRows) {
                 $type = "$($row.Cells["Type"].Value)"; $rootPath = "$($row.Cells["RootRunPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
                 Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $true
-                # Update UI Locally
                 $row.DataBoundItem.Row["Enabled"] = "Yes"
             }
         })
@@ -5214,7 +5109,6 @@ function Show-StartupManager {
             foreach ($row in $winTab.Grid.SelectedRows) {
                 $type = "$($row.Cells["Type"].Value)"; $rootPath = "$($row.Cells["RootRunPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
                 Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $false
-                # Update UI Locally
                 $row.DataBoundItem.Row["Enabled"] = "No"
             }
         })
@@ -5531,7 +5425,12 @@ function Show-StartupManager {
     $btnSvcRefresh.Add_Click({ & $LoadTabOnDemand "Services" $true })
 
     $f.Add_Shown({
-            Switch-View "Windows" $btnWinTab
+            switch ($DefaultTab) {
+                "Scheduled Tasks" { Switch-View "Scheduled Tasks" $btnTaskTab }
+                "Context Menu" { Switch-View "Context Menu" $btnCtxTab }
+                "Services" { Switch-View "Services" $btnSvcTab }
+                default { Switch-View "Windows" $btnWinTab }
+            }
         })
 
     $f.ShowDialog() | Out-Null
@@ -9407,7 +9306,7 @@ $btnDotNetDisable.Add_Click({
         if ($res -ne "Yes") { return }
         Invoke-UiCommand { Set-DotNetRollForward -Mode "Disable" } "Removing .NET roll-forward..."
     })
-$btnTaskManager.Add_Click({ Show-TaskManager })
+$btnTaskManager.Add_Click({ Show-StartupManager -DefaultTab "Scheduled Tasks" })
 $btnInstallGpedit.Add_Click({ Start-GpeditInstall })
 $btnUtilTrim.Add_Click({
         $res = [System.Windows.MessageBox]::Show("Run SSD Trim/ReTrim now? This will optimize all detected SSD volumes.", "Trim SSD", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
