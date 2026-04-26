@@ -5057,7 +5057,13 @@ function Show-StartupManager {
         $approvedPath = ""
         
         if ($Type -eq "Registry") {
-            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            # Route 32-bit Run keys to the native Run32 StartupApproved location
+            if ($RootPath -match "(?i)WOW6432Node") {
+                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
+            }
+            else {
+                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            }
         }
         else {
             if ($RootPath -match "(?i)Roaming") {
@@ -5121,7 +5127,13 @@ function Show-StartupManager {
         $approvedPath = ""
         
         if ($Type -eq "Registry") {
-            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            # Route 32-bit Run keys to the native Run32 StartupApproved location
+            if ($RootPath -match "(?i)WOW6432Node") {
+                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
+            }
+            else {
+                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            }
         }
         else {
             if ($RootPath -match "(?i)Roaming") {
