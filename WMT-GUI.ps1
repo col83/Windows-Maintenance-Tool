@@ -4751,30 +4751,41 @@ function Show-StartupManager {
     $clrAccent = [System.Drawing.ColorTranslator]::FromHtml("#00B7FF")
     $clrSel = [System.Drawing.ColorTranslator]::FromHtml("#0095E0")
 
-    # --- 1. HEADER PANEL (Replaces native Tab Headers) ---
+    # --- 1. HEADER PANEL ---
     $tabHeader = New-Object System.Windows.Forms.Panel
     $tabHeader.Dock = "Top"
     $tabHeader.Height = 44
     $tabHeader.BackColor = $clrBg
     $f.Controls.Add($tabHeader)
 
-    # --- 2. MAIN CONTAINER (Replaces TabControl) ---
+    # --- 2. MAIN CONTAINER ---
     $mainContainer = New-Object System.Windows.Forms.Panel
     $mainContainer.Dock = "Fill"
     $mainContainer.BackColor = $clrBg
     $f.Controls.Add($mainContainer)
-    $mainContainer.BringToFront() # Ensure it sits beneath the Top docked header
+    $mainContainer.BringToFront()
     
     $views = @{}
 
+    # --- RIGHT-CLICK ROW SELECTION FIX ---
+    $RowSelectOnRightClick = {
+        param($eventSender, $e)
+        if ($e.Button -eq 'Right') {
+            $hit = $eventSender.HitTest($e.X, $e.Y)
+            if ($hit.Type -eq 'Cell') {
+                if (-not $eventSender.Rows[$hit.RowIndex].Selected) {
+                    $eventSender.ClearSelection()
+                    $eventSender.Rows[$hit.RowIndex].Selected = $true
+                }
+            }
+        }
+    }
+
     # --- 3. NAVIGATION LOGIC ---
     function Switch-View([string]$title, [System.Windows.Forms.Button]$btn) {
-        # Bring target view panel to the front (Prevents DataGridView collapse bug)
         if ($views.ContainsKey($title)) {
             $views[$title].BringToFront()
         }
-        
-        # Reset all button styles
         foreach ($ctrl in $tabHeader.Controls) {
             if ($ctrl -is [System.Windows.Forms.Button]) {
                 $ctrl.BackColor = $clrPanel
@@ -4782,14 +4793,11 @@ function Show-StartupManager {
                 $ctrl.FlatAppearance.BorderColor = $clrLine
             }
         }
-        # Highlight active button
         if ($btn) {
             $btn.BackColor = $clrElev
             $btn.ForeColor = $clrText
             $btn.FlatAppearance.BorderColor = $clrAccent
         }
-
-        # Trigger data load logic (defined at the bottom of the script)
         & $LoadTabOnDemand $title $false
     }
 
@@ -4809,14 +4817,12 @@ function Show-StartupManager {
         return $b
     }
 
-    # Assign only the first button to a variable so we can click it on load. 
-    # The rest pipe to Out-Null to clear the PSScriptAnalyzer "assigned but unused" warnings.
     $btnWinTab = New-TabBtn "Windows" 14
     New-TabBtn "Scheduled Tasks" 180 | Out-Null
     New-TabBtn "Context Menu" 346 | Out-Null
     New-TabBtn "Services" 512 | Out-Null
 
-    # --- 4. VIEW FACTORY (Replaces New-TabPage) ---
+    # --- 4. VIEW FACTORY ---
     function New-TabPage([string]$title) {
         $tp = New-Object System.Windows.Forms.Panel
         $tp.Dock = "Fill"
@@ -4927,6 +4933,8 @@ function Show-StartupManager {
         $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#202329")
         $dg.GridColor = $clrLine
         
+        $dg.Add_MouseDown($RowSelectOnRightClick)
+
         $tp.Controls.Add($dg)
         $dg.BringToFront()
 
@@ -4969,6 +4977,24 @@ function Show-StartupManager {
         }
         $parent.Controls.Add($b)
         return $b
+    }
+
+    function Add-GridContextMenu {
+        param([System.Windows.Forms.DataGridView]$Grid, [System.Windows.Forms.Button[]]$Buttons)
+        $cms = New-Object System.Windows.Forms.ContextMenuStrip
+        $cms.BackColor = $clrElev
+        $cms.ForeColor = $clrText
+        $cms.ShowImageMargin = $false
+        $cms.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+        foreach ($btn in $Buttons) {
+            $item = $cms.Items.Add($btn.Text)
+            $item.Tag = $btn 
+            $item.Add_Click({
+                    $this.Tag.PerformClick()
+                })
+        }
+        $Grid.ContextMenuStrip = $cms
     }
 
     function Show-StartupRowDetails {
@@ -5031,18 +5057,7 @@ function Show-StartupManager {
         $approvedPath = ""
         
         if ($Type -eq "Registry") {
-            if ($RootPath -match "(?i)WOW6432Node") {
-                # Map WOW6432Node Run to StartupApproved\Run32
-                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
-            }
-            elseif ($RootPath -match "(?i)Run32") {
-                # Explicitly handle the Run32 subkey
-                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run32", "CurrentVersion\Explorer\StartupApproved\Run32"
-            }
-            else {
-                # Standard 64-bit / CurrentUser mapping
-                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
-            }
+            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
         }
         else {
             if ($RootPath -match "(?i)Roaming") {
@@ -5056,51 +5071,10 @@ function Show-StartupManager {
         if ($approvedPath -and (Test-Path $approvedPath)) {
             $val = Get-ItemProperty -Path $approvedPath -ErrorAction SilentlyContinue
             if ($null -ne $val.$ValueName) {
-                # Even = Enabled (0x02), Odd = Disabled (0x03)
                 return ($val.$ValueName[0] % 2 -eq 0)
             }
         }
-        return $true # If missing, it is enabled by default
-    }
-
-    # Helper function to set the native Windows enable/disable state
-    function Set-StartupApprovedState {
-        param([string]$Type, [string]$RootPath, [string]$ValueName, [bool]$Enable)
-        $approvedPath = ""
-
-        if ($Type -eq "Registry") {
-            if ($RootPath -match "(?i)WOW6432Node") {
-                # Map WOW6432Node Run to StartupApproved\Run32
-                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
-            }
-            elseif ($RootPath -match "(?i)Run32") {
-                # Explicitly handle the Run32 subkey
-                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run32", "CurrentVersion\Explorer\StartupApproved\Run32"
-            }
-            else {
-                # Standard 64-bit / CurrentUser mapping
-                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
-            }
-        }
-        else {
-            if ($RootPath -match "(?i)Roaming") {
-                $approvedPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
-            }
-            else {
-                $approvedPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
-            }
-        }
-
-        if (-not (Test-Path $approvedPath)) {
-            New-Item -Path $approvedPath -Force | Out-Null
-        }
-
-        # Generate 12-byte binary payload: [State(1)][Padding(3)][FileTime(8)]
-        $stateByte = if ($Enable) { [byte]0x02 } else { [byte]0x03 }
-        $timeBytes = [BitConverter]::GetBytes([DateTime]::Now.ToFileTime())
-        $payload = [byte[]]($stateByte, 0x00, 0x00, 0x00) + $timeBytes
-
-        Set-ItemProperty -Path $approvedPath -Name $ValueName -Value $payload -Type Binary -ErrorAction SilentlyContinue
+        return $true
     }
     function Get-RegRunEntries([string]$Path, [string]$Scope) {
         $items = @()
@@ -5137,23 +5111,17 @@ function Show-StartupManager {
         return $items
     }
 
+    # =========================================================================
     # Tab 1: Windows Startup
+    # =========================================================================
     $winTab = New-TabPage "Windows"
 
-    # Helper function to set the native Windows enable/disable state
     function Set-StartupApprovedState {
         param([string]$Type, [string]$RootPath, [string]$ValueName, [bool]$Enable)
         $approvedPath = ""
         
         if ($Type -eq "Registry") {
-            if ($RootPath -match "(?i)WOW6432Node") {
-                # Map WOW6432Node Run to StartupApproved\Run32
-                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
-            }
-            else {
-                # Standard 64-bit / CurrentUser mapping
-                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
-            }
+            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
         }
         else {
             if ($RootPath -match "(?i)Roaming") {
@@ -5164,11 +5132,8 @@ function Show-StartupManager {
             }
         }
 
-        if (-not (Test-Path $approvedPath)) {
-            New-Item -Path $approvedPath -Force | Out-Null
-        }
+        if (-not (Test-Path $approvedPath)) { New-Item -Path $approvedPath -Force | Out-Null }
 
-        # Generate 12-byte binary payload: [State(1)][Padding(3)][FileTime(8)]
         $stateByte = if ($Enable) { [byte]0x02 } else { [byte]0x03 }
         $timeBytes = [BitConverter]::GetBytes([DateTime]::Now.ToFileTime())
         $payload = [byte[]]($stateByte, 0x00, 0x00, 0x00) + $timeBytes
@@ -5208,6 +5173,8 @@ function Show-StartupManager {
         if ($winTab.Grid.Columns["RootRunPath"]) { $winTab.Grid.Columns["RootRunPath"].Visible = $false }
         if ($winTab.Grid.Columns["Location"]) { $winTab.Grid.Columns["Location"].Visible = $false }
         if ($winTab.Grid.Columns["Command"]) { $winTab.Grid.Columns["Command"].Visible = $false }
+        
+        Update-TabFilter -TabObj $winTab # Ensure search box state persists on hard refreshes
     }
 
     $btnWinRefresh = New-StartupBtn $winTab.Panel "Refresh" 15
@@ -5216,44 +5183,49 @@ function Show-StartupManager {
     $btnWinDisable = New-StartupBtn $winTab.Panel "Disable" 405 "#8A6A00"
     $btnWinDelete = New-StartupBtn $winTab.Panel "Delete" 535 "#7B2026"
 
+    Add-GridContextMenu -Grid $winTab.Grid -Buttons @($btnWinRefresh, $btnWinDetails, $btnWinEnable, $btnWinDisable, $btnWinDelete)
+
     $winTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $winTab })
     $btnWinDetails.Add_Click({ Show-StartupRowDetails -Grid $winTab.Grid -Title "Windows Startup Details" })
     $winTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $winTab.Grid -Title "Windows Startup Details" })
 
     $btnWinEnable.Add_Click({
             foreach ($row in $winTab.Grid.SelectedRows) {
-                $type = "$($row.Cells["Type"].Value)"
-                $rootPath = "$($row.Cells["RootRunPath"].Value)"
-                $valueName = "$($row.Cells["ValueName"].Value)"
-            
+                $type = "$($row.Cells["Type"].Value)"; $rootPath = "$($row.Cells["RootRunPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
                 Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $true
+                # Update UI Locally
+                $row.DataBoundItem.Row["Enabled"] = "Yes"
             }
-            & $LoadWindowsStartup
         })
 
     $btnWinDisable.Add_Click({
             foreach ($row in $winTab.Grid.SelectedRows) {
-                $type = "$($row.Cells["Type"].Value)"
-                $rootPath = "$($row.Cells["RootRunPath"].Value)"
-                $valueName = "$($row.Cells["ValueName"].Value)"
-            
+                $type = "$($row.Cells["Type"].Value)"; $rootPath = "$($row.Cells["RootRunPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
                 Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $false
+                # Update UI Locally
+                $row.DataBoundItem.Row["Enabled"] = "No"
             }
-            & $LoadWindowsStartup
         })
 
     $btnWinDelete.Add_Click({
             if ($winTab.Grid.SelectedRows.Count -eq 0) { return }
             if ([System.Windows.Forms.MessageBox]::Show("Delete selected entries?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+            
+            $rowsToDelete = @()
             foreach ($row in $winTab.Grid.SelectedRows) {
                 $type = "$($row.Cells["Type"].Value)"; $itemPath = "$($row.Cells["ItemPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
                 if ($type -eq "StartupFolder") { try { Remove-Item -LiteralPath $itemPath -Force -ErrorAction SilentlyContinue } catch {} } 
                 elseif ($type -eq "Registry" -and $itemPath -and $valueName) { try { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue } catch {} }
+                $rowsToDelete += $row.DataBoundItem.Row
             }
-            & $LoadWindowsStartup
+            foreach ($dr in $rowsToDelete) { $dr.Delete() }
+            $winTab.Meta.Table.AcceptChanges()
+            Update-TabFilter -TabObj $winTab
         })
 
+    # =========================================================================
     # Tab 2: Scheduled Tasks
+    # =========================================================================
     $taskTab = New-TabPage "Scheduled Tasks"
     $LoadScheduledTasks = {
         $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName, TaskPath, State
@@ -5264,6 +5236,7 @@ function Show-StartupManager {
             $dt.Rows.Add($r)
         }
         Set-TabData -TabObj $taskTab -DataTable $dt -SearchColumns @("TaskName", "Path", "State")
+        Update-TabFilter -TabObj $taskTab
     }
 
     $btnTaskRefresh = New-StartupBtn $taskTab.Panel "Refresh" 15
@@ -5272,6 +5245,8 @@ function Show-StartupManager {
     $btnTaskDisable = New-StartupBtn $taskTab.Panel "Disable" 405 "#8A6A00"
     $btnTaskDelete = New-StartupBtn $taskTab.Panel "Delete" 535 "#7B2026"
 
+    Add-GridContextMenu -Grid $taskTab.Grid -Buttons @($btnTaskRefresh, $btnTaskDetails, $btnTaskEnable, $btnTaskDisable, $btnTaskDelete)
+
     $taskTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $taskTab })
     $btnTaskDetails.Add_Click({ Show-StartupRowDetails -Grid $taskTab.Grid -Title "Task Details" })
     $taskTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $taskTab.Grid -Title "Task Details" })
@@ -5279,34 +5254,44 @@ function Show-StartupManager {
     $btnTaskEnable.Add_Click({
             foreach ($row in $taskTab.Grid.SelectedRows) {
                 $name = "$($row.Cells["TaskName"].Value)"; $path = "$($row.Cells["Path"].Value)"
-                if ($name -and $path) { Enable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue }
+                if ($name -and $path) { 
+                    Enable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue 
+                    $row.DataBoundItem.Row["State"] = "Ready"
+                }
             }
-            & $LoadScheduledTasks
         })
 
     $btnTaskDisable.Add_Click({
             foreach ($row in $taskTab.Grid.SelectedRows) {
                 $name = "$($row.Cells["TaskName"].Value)"; $path = "$($row.Cells["Path"].Value)"
-                if ($name -and $path) { Disable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue }
+                if ($name -and $path) { 
+                    Disable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue 
+                    $row.DataBoundItem.Row["State"] = "Disabled"
+                }
             }
-            & $LoadScheduledTasks
         })
 
     $btnTaskDelete.Add_Click({
             if ($taskTab.Grid.SelectedRows.Count -eq 0) { return }
             if ([System.Windows.Forms.MessageBox]::Show("Delete selected tasks?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+            
+            $rowsToDelete = @()
             foreach ($row in $taskTab.Grid.SelectedRows) {
                 $name = "$($row.Cells["TaskName"].Value)"; $path = "$($row.Cells["Path"].Value)"
                 if ($name -and $path) { Unregister-ScheduledTask -TaskName $name -TaskPath $path -Confirm:$false -ErrorAction SilentlyContinue }
+                $rowsToDelete += $row.DataBoundItem.Row
             }
-            & $LoadScheduledTasks
+            foreach ($dr in $rowsToDelete) { $dr.Delete() }
+            $taskTab.Meta.Table.AcceptChanges()
+            Update-TabFilter -TabObj $taskTab
         })
 
+    # =========================================================================
     # Tab 3: Context Menu
+    # =========================================================================
     $ctxTab = New-TabPage "Context Menu"
     
     $LoadContextMenu = {
-        # 1. Safely map the HKCR drive to bypass strict Registry Provider parsing bugs
         if (-not (Get-PSDrive HKCR -ErrorAction SilentlyContinue)) {
             New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -ErrorAction SilentlyContinue | Out-Null
         }
@@ -5320,7 +5305,6 @@ function Show-StartupManager {
         )
         
         foreach ($r in $roots) {
-            # Use LiteralPath so '*' isn't treated as a wildcard search
             if (-not (Test-Path -LiteralPath $r.Path -ErrorAction SilentlyContinue)) { continue }
             
             $subs = Get-ChildItem -LiteralPath $r.Path -ErrorAction SilentlyContinue
@@ -5329,13 +5313,9 @@ function Show-StartupManager {
             foreach ($s in $subs) {
                 $enabled = "Yes"
                 $disableProp = Get-ItemProperty -LiteralPath $s.PSPath -Name "LegacyDisable" -ErrorAction SilentlyContinue
-                if ($null -ne $disableProp) { 
-                    $enabled = "No" 
-                }
+                if ($null -ne $disableProp) { $enabled = "No" }
                 
-                $items += [PSCustomObject]@{ 
-                    Name = $s.PSChildName; Enabled = $enabled; Root = $r.RootName; Path = $s.PSPath; KeyName = $s.Name 
-                }
+                $items += [PSCustomObject]@{ Name = $s.PSChildName; Enabled = $enabled; Root = $r.RootName; Path = $s.PSPath; KeyName = $s.Name }
             }
         }
         
@@ -5348,11 +5328,8 @@ function Show-StartupManager {
 
         foreach ($i in $items) {
             $r = $dt.NewRow()
-            $r["Name"] = "$($i.Name)"
-            $r["Enabled"] = "$($i.Enabled)"
-            $r["Root"] = "$($i.Root)"
-            $r["Path"] = "$($i.Path)"
-            $r["KeyName"] = "$($i.KeyName)"
+            $r["Name"] = "$($i.Name)"; $r["Enabled"] = "$($i.Enabled)"; $r["Root"] = "$($i.Root)"
+            $r["Path"] = "$($i.Path)"; $r["KeyName"] = "$($i.KeyName)"
             $dt.Rows.Add($r)
         }
 
@@ -5364,6 +5341,8 @@ function Show-StartupManager {
         if ($ctxTab.Grid.Columns["Root"]) { $ctxTab.Grid.Columns["Root"].FillWeight = 20 }
         if ($ctxTab.Grid.Columns["Path"]) { $ctxTab.Grid.Columns["Path"].Visible = $false }
         if ($ctxTab.Grid.Columns["KeyName"]) { $ctxTab.Grid.Columns["KeyName"].Visible = $false }
+        
+        Update-TabFilter -TabObj $ctxTab
     }
 
     $btnCtxRefresh = New-StartupBtn $ctxTab.Panel "Refresh" 15
@@ -5372,6 +5351,8 @@ function Show-StartupManager {
     $btnCtxDisable = New-StartupBtn $ctxTab.Panel "Disable" 405 "#8A6A00"
     $btnCtxDelete = New-StartupBtn $ctxTab.Panel "Delete" 535 "#7B2026"
     
+    Add-GridContextMenu -Grid $ctxTab.Grid -Buttons @($btnCtxRefresh, $btnCtxDetails, $btnCtxEnable, $btnCtxDisable, $btnCtxDelete)
+
     $ctxTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $ctxTab })
     $btnCtxDetails.Add_Click({ Show-StartupRowDetails -Grid $ctxTab.Grid -Title "Context Menu Details" })
     $ctxTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $ctxTab.Grid -Title "Context Menu Details" })
@@ -5379,30 +5360,41 @@ function Show-StartupManager {
     $btnCtxEnable.Add_Click({
             foreach ($row in $ctxTab.Grid.SelectedRows) {
                 $path = "$($row.Cells["Path"].Value)"
-                if ($path -and (Test-Path -LiteralPath $path)) { Remove-ItemProperty -LiteralPath $path -Name "LegacyDisable" -ErrorAction SilentlyContinue }
+                if ($path -and (Test-Path -LiteralPath $path)) { 
+                    Remove-ItemProperty -LiteralPath $path -Name "LegacyDisable" -ErrorAction SilentlyContinue 
+                    $row.DataBoundItem.Row["Enabled"] = "Yes"
+                }
             }
-            & $LoadContextMenu
         })
     
     $btnCtxDisable.Add_Click({
             foreach ($row in $ctxTab.Grid.SelectedRows) {
                 $path = "$($row.Cells["Path"].Value)"
-                if ($path -and (Test-Path -LiteralPath $path)) { Set-ItemProperty -LiteralPath $path -Name "LegacyDisable" -Value "" -ErrorAction SilentlyContinue }
+                if ($path -and (Test-Path -LiteralPath $path)) { 
+                    Set-ItemProperty -LiteralPath $path -Name "LegacyDisable" -Value "" -ErrorAction SilentlyContinue 
+                    $row.DataBoundItem.Row["Enabled"] = "No"
+                }
             }
-            & $LoadContextMenu
         })
     
     $btnCtxDelete.Add_Click({
             if ($ctxTab.Grid.SelectedRows.Count -eq 0) { return }
             if ([System.Windows.Forms.MessageBox]::Show("Delete selected context menu entries?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+            
+            $rowsToDelete = @()
             foreach ($row in $ctxTab.Grid.SelectedRows) {
                 $path = "$($row.Cells["Path"].Value)"
                 if ($path -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
+                $rowsToDelete += $row.DataBoundItem.Row
             }
-            & $LoadContextMenu
+            foreach ($dr in $rowsToDelete) { $dr.Delete() }
+            $ctxTab.Meta.Table.AcceptChanges()
+            Update-TabFilter -TabObj $ctxTab
         })
 
+    # =========================================================================
     # Tab 4: Services
+    # =========================================================================
     $svcTab = New-TabPage "Services"
     $LoadServices = {
         $svcs = Get-Service -ErrorAction SilentlyContinue | Sort-Object DisplayName
@@ -5435,13 +5427,18 @@ function Show-StartupManager {
         if ($svcTab.Grid.Columns["Name"]) { $svcTab.Grid.Columns["Name"].FillWeight = 24 }
         if ($svcTab.Grid.Columns["StartType"]) { $svcTab.Grid.Columns["StartType"].FillWeight = 10 }
         if ($svcTab.Grid.Columns["State"]) { $svcTab.Grid.Columns["State"].FillWeight = 10 }
+        
+        Update-TabFilter -TabObj $svcTab
     }
 
     $btnSvcRefresh = New-StartupBtn $svcTab.Panel "Refresh" 15
     $btnSvcDetails = New-StartupBtn $svcTab.Panel "Details" 145
     $btnSvcEnable = New-StartupBtn $svcTab.Panel "Enable Auto" 275 "#1E6F43"
-    $btnSvcDisable = New-StartupBtn $svcTab.Panel "Disable" 405 "#8A6A00"
-    $btnSvcDelete = New-StartupBtn $svcTab.Panel "Delete" 535 "#7B2026"
+    $btnSvcManual = New-StartupBtn $svcTab.Panel "Manual" 405 "#005A9E"  
+    $btnSvcDisable = New-StartupBtn $svcTab.Panel "Disable" 535 "#8A6A00"
+    $btnSvcDelete = New-StartupBtn $svcTab.Panel "Delete" 665 "#7B2026"
+
+    Add-GridContextMenu -Grid $svcTab.Grid -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
 
     $svcTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $svcTab })
     $btnSvcDetails.Add_Click({ Show-StartupRowDetails -Grid $svcTab.Grid -Title "Service Details" })
@@ -5450,27 +5447,46 @@ function Show-StartupManager {
     $btnSvcEnable.Add_Click({
             foreach ($row in $svcTab.Grid.SelectedRows) {
                 $name = "$($row.Cells["Name"].Value)"
-                if ($name) { Set-Service -Name $name -StartupType Automatic -ErrorAction SilentlyContinue }
+                if ($name) { 
+                    Set-Service -Name $name -StartupType Automatic -ErrorAction SilentlyContinue 
+                    $row.DataBoundItem.Row["StartType"] = "Automatic"
+                }
             }
-            & $LoadServices
+        })
+
+    $btnSvcManual.Add_Click({
+            foreach ($row in $svcTab.Grid.SelectedRows) {
+                $name = "$($row.Cells["Name"].Value)"
+                if ($name) { 
+                    Set-Service -Name $name -StartupType Manual -ErrorAction SilentlyContinue 
+                    $row.DataBoundItem.Row["StartType"] = "Manual"
+                }
+            }
         })
 
     $btnSvcDisable.Add_Click({
             foreach ($row in $svcTab.Grid.SelectedRows) {
                 $name = "$($row.Cells["Name"].Value)"
-                if ($name) { Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue }
+                if ($name) { 
+                    Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue 
+                    $row.DataBoundItem.Row["StartType"] = "Disabled"
+                }
             }
-            & $LoadServices
         })
 
     $btnSvcDelete.Add_Click({
             if ($svcTab.Grid.SelectedRows.Count -eq 0) { return }
             if ([System.Windows.Forms.MessageBox]::Show("Delete selected services? This is risky.", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
+            
+            $rowsToDelete = @()
             foreach ($row in $svcTab.Grid.SelectedRows) {
                 $name = "$($row.Cells["Name"].Value)"
                 if ($name) { sc.exe delete "$name" | Out-Null }
+                $rowsToDelete += $row.DataBoundItem.Row
             }
-            & $LoadServices
+            foreach ($dr in $rowsToDelete) { $dr.Delete() }
+            $svcTab.Meta.Table.AcceptChanges()
+            Update-TabFilter -TabObj $svcTab
         })
 
     # --- 5. DATA LOADING LOGIC ---
@@ -5502,7 +5518,6 @@ function Show-StartupManager {
     $btnCtxRefresh.Add_Click({ & $LoadTabOnDemand "Context Menu" $true })
     $btnSvcRefresh.Add_Click({ & $LoadTabOnDemand "Services" $true })
 
-    # Click the first tab button on launch to trigger the view switch and load data
     $f.Add_Shown({
             Switch-View "Windows" $btnWinTab
         })
