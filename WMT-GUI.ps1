@@ -5035,6 +5035,10 @@ function Show-StartupManager {
                 # Map WOW6432Node Run to StartupApproved\Run32
                 $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
             }
+            elseif ($RootPath -match "(?i)Run32") {
+                # Explicitly handle the Run32 subkey
+                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run32", "CurrentVersion\Explorer\StartupApproved\Run32"
+            }
             else {
                 # Standard 64-bit / CurrentUser mapping
                 $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
@@ -5057,6 +5061,46 @@ function Show-StartupManager {
             }
         }
         return $true # If missing, it is enabled by default
+    }
+
+    # Helper function to set the native Windows enable/disable state
+    function Set-StartupApprovedState {
+        param([string]$Type, [string]$RootPath, [string]$ValueName, [bool]$Enable)
+        $approvedPath = ""
+
+        if ($Type -eq "Registry") {
+            if ($RootPath -match "(?i)WOW6432Node") {
+                # Map WOW6432Node Run to StartupApproved\Run32
+                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
+            }
+            elseif ($RootPath -match "(?i)Run32") {
+                # Explicitly handle the Run32 subkey
+                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run32", "CurrentVersion\Explorer\StartupApproved\Run32"
+            }
+            else {
+                # Standard 64-bit / CurrentUser mapping
+                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            }
+        }
+        else {
+            if ($RootPath -match "(?i)Roaming") {
+                $approvedPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
+            }
+            else {
+                $approvedPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
+            }
+        }
+
+        if (-not (Test-Path $approvedPath)) {
+            New-Item -Path $approvedPath -Force | Out-Null
+        }
+
+        # Generate 12-byte binary payload: [State(1)][Padding(3)][FileTime(8)]
+        $stateByte = if ($Enable) { [byte]0x02 } else { [byte]0x03 }
+        $timeBytes = [BitConverter]::GetBytes([DateTime]::Now.ToFileTime())
+        $payload = [byte[]]($stateByte, 0x00, 0x00, 0x00) + $timeBytes
+
+        Set-ItemProperty -Path $approvedPath -Name $ValueName -Value $payload -Type Binary -ErrorAction SilentlyContinue
     }
     function Get-RegRunEntries([string]$Path, [string]$Scope) {
         $items = @()
