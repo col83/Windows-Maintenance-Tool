@@ -5031,7 +5031,14 @@ function Show-StartupManager {
         $approvedPath = ""
         
         if ($Type -eq "Registry") {
-            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            if ($RootPath -match "(?i)WOW6432Node") {
+                # Map WOW6432Node Run to StartupApproved\Run32
+                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
+            }
+            else {
+                # Standard 64-bit / CurrentUser mapping
+                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            }
         }
         else {
             if ($RootPath -match "(?i)Roaming") {
@@ -5095,7 +5102,14 @@ function Show-StartupManager {
         $approvedPath = ""
         
         if ($Type -eq "Registry") {
-            $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            if ($RootPath -match "(?i)WOW6432Node") {
+                # Map WOW6432Node Run to StartupApproved\Run32
+                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
+            }
+            else {
+                # Standard 64-bit / CurrentUser mapping
+                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
+            }
         }
         else {
             if ($RootPath -match "(?i)Roaming") {
@@ -5106,7 +5120,9 @@ function Show-StartupManager {
             }
         }
 
-        if (-not (Test-Path $approvedPath)) { New-Item -Path $approvedPath -Force | Out-Null }
+        if (-not (Test-Path $approvedPath)) {
+            New-Item -Path $approvedPath -Force | Out-Null
+        }
 
         # Generate 12-byte binary payload: [State(1)][Padding(3)][FileTime(8)]
         $stateByte = if ($Enable) { [byte]0x02 } else { [byte]0x03 }
